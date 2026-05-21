@@ -1,0 +1,27 @@
+[package]
+name = "pull-all-tui"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "pull-all-tui"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+clap = { version = "4", features = ["derive", "env"] }
+num_cpus = "1"
+anyhow = "1"
+futures = "0.3"
+tokio-stream = "0.1"
+strip-ansi-escapes = "0.2"
+unicode-width = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+opt-level = 3
