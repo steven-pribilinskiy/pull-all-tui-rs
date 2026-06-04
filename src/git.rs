@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use tokio::process::Command;
 
+use crate::app::RepoDetails;
+
 /// Result of parsing git pull output to determine status.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PullOutcome {
@@ -163,6 +165,111 @@ pub fn normalize_remote_url(raw: &str) -> Option<String> {
     Some(https.strip_suffix(".git").unwrap_or(&https).to_string())
 }
 
+/// Parse the US (0x1f)-separated `git log -1 --format=%h%x1f%s%x1f%an%x1f%cr` line
+/// into (hash, subject, author, relative-date).
+pub fn parse_commit_line(line: &str) -> (String, String, String, String) {
+    let line = line.trim_end_matches(['\n', '\r']);
+    let mut parts = line.split('\u{1f}');
+    (
+        parts.next().unwrap_or("").to_string(),
+        parts.next().unwrap_or("").to_string(),
+        parts.next().unwrap_or("").to_string(),
+        parts.next().unwrap_or("").to_string(),
+    )
+}
+
+/// Parse `git rev-list --left-right --count @{u}...HEAD` output ("behind\tahead")
+/// into (behind, ahead). Empty/garbage input yields (None, None).
+pub fn parse_ahead_behind(text: &str) -> (Option<u32>, Option<u32>) {
+    let mut nums = text.split_whitespace();
+    let behind = nums.next().and_then(|value| value.parse().ok());
+    let ahead = nums.next().and_then(|value| value.parse().ok());
+    (behind, ahead)
+}
+
+/// Fetch the lazy info-panel details for one repo: last commit, ahead/behind vs
+/// upstream, dirty file count, and stash count. Best-effort — failures leave defaults.
+pub async fn get_repo_details(dir: &Path) -> RepoDetails {
+    let dir_str = dir.to_str().unwrap_or(".");
+    let mut details = RepoDetails::default();
+
+    if let Ok(output) = Command::new("git")
+        .args(["-C", dir_str, "log", "-1", "--format=%h%x1f%s%x1f%an%x1f%cr"])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            let line = String::from_utf8_lossy(&output.stdout);
+            let (hash, subject, author, rel_date) = parse_commit_line(&line);
+            details.commit_hash = hash;
+            details.commit_subject = subject;
+            details.commit_author = author;
+            details.commit_rel_date = rel_date;
+        }
+    }
+
+    if let Ok(output) = Command::new("git")
+        .args(["-C", dir_str, "rev-list", "--left-right", "--count", "@{u}...HEAD"])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let (behind, ahead) = parse_ahead_behind(&text);
+            details.behind = behind;
+            details.ahead = ahead;
+        }
+    }
+
+    if let Ok(output) = Command::new("git")
+        .args(["-C", dir_str, "status", "--porcelain"])
+        .output()
+        .await
+    {
+        details.dirty_count = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count() as u32;
+    }
+
+    if let Ok(output) = Command::new("git")
+        .args(["-C", dir_str, "stash", "list"])
+        .output()
+        .await
+    {
+        details.stash_count = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count() as u32;
+    }
+
+    details
+}
+
+/// Fetch a colored diff for the info panel: working-tree changes when `dirty`,
+/// otherwise the most recent pull's diff (`HEAD@{1}..HEAD`). Returns its lines.
+pub async fn get_diff(dir: &Path, dirty: bool) -> Vec<String> {
+    let dir_str = dir.to_str().unwrap_or(".");
+    let args: Vec<&str> = if dirty {
+        vec!["-C", dir_str, "diff", "--color=always"]
+    } else {
+        vec!["-C", dir_str, "diff", "--color=always", "HEAD@{1}", "HEAD"]
+    };
+    let output = match Command::new("git").args(&args).output().await {
+        Ok(output) => output,
+        Err(_) => return vec!["(diff unavailable)".to_string()],
+    };
+    let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.to_string())
+        .collect();
+    if lines.is_empty() {
+        vec!["(no changes)".to_string()]
+    } else {
+        lines
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +359,31 @@ mod tests {
         );
         assert_eq!(normalize_remote_url(""), None);
         assert_eq!(normalize_remote_url("/local/path/repo"), None);
+    }
+
+    #[test]
+    fn parse_commit_line_splits_us_fields() {
+        let line = "a1b2c3d\u{1f}fix: handle empty input\u{1f}Ada Byron\u{1f}2 hours ago\n";
+        let (hash, subject, author, rel) = parse_commit_line(line);
+        assert_eq!(hash, "a1b2c3d");
+        assert_eq!(subject, "fix: handle empty input");
+        assert_eq!(author, "Ada Byron");
+        assert_eq!(rel, "2 hours ago");
+    }
+
+    #[test]
+    fn parse_commit_line_tolerates_missing_fields() {
+        let (hash, subject, author, rel) = parse_commit_line("deadbee");
+        assert_eq!(hash, "deadbee");
+        assert_eq!(subject, "");
+        assert_eq!(author, "");
+        assert_eq!(rel, "");
+    }
+
+    #[test]
+    fn parse_ahead_behind_reads_behind_then_ahead() {
+        assert_eq!(parse_ahead_behind("3\t5\n"), (Some(3), Some(5)));
+        assert_eq!(parse_ahead_behind("0\t0\n"), (Some(0), Some(0)));
+        assert_eq!(parse_ahead_behind(""), (None, None));
     }
 }

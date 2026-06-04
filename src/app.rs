@@ -39,6 +39,29 @@ impl RepoStatus {
     }
 }
 
+/// What the right pane shows for the selected repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RightView {
+    #[default]
+    Log,
+    Info,
+    Diff,
+}
+
+/// Extra per-repo facts fetched lazily for the info panel (one git call each).
+#[derive(Debug, Clone, Default)]
+pub struct RepoDetails {
+    /// Commits ahead/behind upstream; None when there's no upstream.
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    pub dirty_count: u32,
+    pub stash_count: u32,
+    pub commit_hash: String,
+    pub commit_subject: String,
+    pub commit_author: String,
+    pub commit_rel_date: String,
+}
+
 /// Ring buffer capped at `RING_BUFFER_CAPACITY` lines.
 #[derive(Debug, Default)]
 pub struct LogBuffer {
@@ -80,6 +103,12 @@ pub struct RepoState {
     pub start: Option<Instant>,
     /// Wall-clock time spent on this repo, set when a terminal status is assigned.
     pub elapsed: Option<Duration>,
+    /// Lazily-fetched info-panel details (last commit, ahead/behind, dirty/stash counts).
+    pub details: Option<RepoDetails>,
+    /// Guard so the details fetch is spawned at most once per repo.
+    pub details_loading: bool,
+    /// Transient diff-view buffer (filled lazily when the Diff view is opened).
+    pub diff: Option<Vec<String>>,
 }
 
 impl RepoState {
@@ -95,6 +124,9 @@ impl RepoState {
             preview_scroll: 0,
             start: None,
             elapsed: None,
+            details: None,
+            details_loading: false,
+            diff: None,
         }
     }
 }
@@ -146,6 +178,8 @@ pub struct AppState {
     pub divider_col: u16,
     /// Scroll offset of the list widget, read back after render for row hit-testing.
     pub list_offset: usize,
+    /// What the right pane shows for the selected repo (log, info, or diff).
+    pub right_view: RightView,
     /// Whether the help modal (`?`) is open.
     pub show_help: bool,
     /// Scroll offset within the help modal.
@@ -175,6 +209,7 @@ impl AppState {
             preview_area: Rect::default(),
             divider_col: 0,
             list_offset: 0,
+            right_view: RightView::Log,
             show_help: false,
             help_scroll: 0,
             help_links: Vec::new(),
@@ -336,6 +371,7 @@ impl AppState {
     pub fn nav_up(&mut self) -> bool {
         self.user_navigated = true;
         self.result_overlay = false;
+        self.right_view = RightView::Log;
         if self.selected > 0 {
             self.selected -= 1;
             true
@@ -348,6 +384,7 @@ impl AppState {
     pub fn nav_down(&mut self) -> bool {
         self.user_navigated = true;
         self.result_overlay = false;
+        self.right_view = RightView::Log;
         let max = self.list_len().saturating_sub(1);
         if self.selected < max {
             self.selected += 1;
@@ -360,12 +397,14 @@ impl AppState {
     pub fn nav_top(&mut self) {
         self.user_navigated = true;
         self.result_overlay = false;
+        self.right_view = RightView::Log;
         self.selected = 0;
     }
 
     pub fn nav_bottom(&mut self) {
         self.user_navigated = true;
         self.result_overlay = false;
+        self.right_view = RightView::Log;
         self.selected = self.list_len().saturating_sub(1);
     }
 

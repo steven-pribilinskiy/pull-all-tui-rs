@@ -7,8 +7,8 @@ use tokio::sync::Semaphore;
 
 use crate::app::{AppState, RepoStatus, SharedRepoState, WorktreeEntry};
 use crate::git::{
-    classify_pull_output, diff_stat, discover_worktrees, get_branch, get_remote_url, is_dirty,
-    PullOutcome,
+    classify_pull_output, diff_stat, discover_worktrees, get_branch, get_diff, get_remote_url,
+    get_repo_details, is_dirty, PullOutcome,
 };
 
 /// Pull a single repository, updating `repo_state` as progress arrives.
@@ -199,5 +199,24 @@ pub async fn run_remote_url_discovery(repos: Vec<SharedRepoState>, max_jobs: usi
     for handle in handles {
         let _ = handle.await;
     }
+}
+
+/// Fetch the info-panel details for one repo (last commit, ahead/behind, dirty/stash counts)
+/// and store them. The caller sets `details_loading` before spawning; this clears it.
+pub async fn run_repo_details(repo: SharedRepoState) {
+    let path = { repo.lock().unwrap().path.clone() };
+    let details = get_repo_details(&path).await;
+    let mut state = repo.lock().unwrap();
+    state.details = Some(details);
+    state.details_loading = false;
+}
+
+/// Fetch the diff for one repo (working-tree changes if dirty, else the last pull's diff)
+/// and store it in the transient diff buffer for the Diff view.
+pub async fn run_repo_diff(repo: SharedRepoState) {
+    let path = { repo.lock().unwrap().path.clone() };
+    let dirty = is_dirty(&path).await.unwrap_or(false);
+    let diff = get_diff(&path, dirty).await;
+    repo.lock().unwrap().diff = Some(diff);
 }
 

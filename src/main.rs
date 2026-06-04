@@ -25,8 +25,11 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{AppState, RepoState, RepoStatus, SharedRepoState};
-use worker::{run_all_pulls, run_remote_url_discovery, run_worktree_discovery};
+use app::{AppState, RepoState, RepoStatus, RightView, SharedRepoState};
+use worker::{
+    run_all_pulls, run_remote_url_discovery, run_repo_details, run_repo_diff,
+    run_worktree_discovery,
+};
 
 /// Interactive multi-repo git pull dashboard.
 #[derive(Parser, Debug)]
@@ -135,6 +138,57 @@ fn open_url(url: &str) {
             return;
         }
     }
+}
+
+/// Copy text to the system clipboard via the first available tool, writing to its stdin.
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    let tools: [(&str, &[&str]); 4] = [
+        ("clip.exe", &[]),
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("pbcopy", &[]),
+    ];
+    for (tool, args) in tools {
+        let child = Command::new(tool)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(mut child) = child {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+            return;
+        }
+    }
+}
+
+/// Suspend the TUI, run claude code in `path` (the `cc` alias by default, overridable via
+/// `PULL_CLAUDE_CMD`), then restore the alternate screen and mouse capture.
+fn launch_claude(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    path: &std::path::Path,
+) -> Result<()> {
+    let command = std::env::var("PULL_CLAUDE_CMD").unwrap_or_else(|_| "cc".to_string());
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    terminal.show_cursor()?;
+
+    // `-i` sources ~/.bashrc so the `cc` alias resolves; the path is passed as $1 to avoid quoting.
+    let script = format!("cd \"$1\" && {command}");
+    let _ = Command::new("bash")
+        .args(["-ic", &script, "pull-all"])
+        .arg(path)
+        .status();
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+    terminal.clear()?;
+    Ok(())
 }
 
 async fn run() -> Result<i32> {
@@ -318,6 +372,9 @@ async fn run_event_loop(
     // Whether the divider is currently being dragged with the mouse.
     let mut dragging_divider = false;
 
+    // Set when `c` is pressed; the TUI is suspended to run claude code after event handling.
+    let mut pending_claude: Option<std::path::PathBuf> = None;
+
     loop {
         // Update "all done" state and auto-select Result when complete
         {
@@ -425,6 +482,7 @@ async fn run_event_loop(
                             app.selected = selection;
                             app.user_navigated = true;
                             app.result_overlay = false;
+                            app.right_view = RightView::Log;
                         }
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
@@ -611,10 +669,71 @@ async fn run_event_loop(
                     }
 
                     // Clear log buffer for selected repo
-                    (KeyCode::Char('c'), _) => {
+                    (KeyCode::Char('x'), _) => {
                         if let Some(repo_idx) = app.selected_repo_index() {
                             let mut state = app.repos[repo_idx].lock().unwrap();
                             state.log.clear();
+                        }
+                    }
+
+                    // Toggle the per-repo info view in the right pane.
+                    (KeyCode::Char('i'), _) => {
+                        app.right_view = if app.right_view == RightView::Info {
+                            RightView::Log
+                        } else {
+                            RightView::Info
+                        };
+                    }
+                    // Toggle the per-repo diff view in the right pane.
+                    (KeyCode::Char('d'), _) => {
+                        if app.right_view == RightView::Diff {
+                            // Toggling off: drop the cached diff so it refreshes next time.
+                            if let Some(repo_idx) = app.selected_repo_index() {
+                                app.repos[repo_idx].lock().unwrap().diff = None;
+                            }
+                            app.right_view = RightView::Log;
+                        } else {
+                            // Entering Diff: start at the top, not the log's scroll position.
+                            if let Some(repo_idx) = app.selected_repo_index() {
+                                let mut state = app.repos[repo_idx].lock().unwrap();
+                                state.preview_scroll = 0;
+                                state.auto_scroll = false;
+                            }
+                            app.right_view = RightView::Diff;
+                        }
+                    }
+                    // Open the selected repo's remote in the browser.
+                    (KeyCode::Char('o'), _) => {
+                        let url = app
+                            .selected_repo_index()
+                            .and_then(|idx| app.repos[idx].lock().unwrap().remote_url.clone());
+                        if let Some(url) = url {
+                            drop(app);
+                            open_url(&url);
+                        }
+                    }
+                    // Copy the selected repo's local path to the clipboard.
+                    (KeyCode::Char('y'), _) => {
+                        if let Some(idx) = app.selected_repo_index() {
+                            let path = app.repos[idx].lock().unwrap().path.display().to_string();
+                            drop(app);
+                            copy_to_clipboard(&path);
+                        }
+                    }
+                    // Copy the selected repo's remote URL to the clipboard.
+                    (KeyCode::Char('Y'), _) => {
+                        let url = app
+                            .selected_repo_index()
+                            .and_then(|idx| app.repos[idx].lock().unwrap().remote_url.clone());
+                        if let Some(url) = url {
+                            drop(app);
+                            copy_to_clipboard(&url);
+                        }
+                    }
+                    // Start claude code in the selected repo (suspends the TUI; handled below).
+                    (KeyCode::Char('c'), _) => {
+                        if let Some(idx) = app.selected_repo_index() {
+                            pending_claude = Some(app.repos[idx].lock().unwrap().path.clone());
                         }
                     }
 
@@ -661,6 +780,41 @@ async fn run_event_loop(
                 }
             }
             _ => {}
+            }
+        }
+
+        // Suspend the TUI and run claude code when requested (app lock already released).
+        if let Some(path) = pending_claude.take() {
+            launch_claude(terminal, &path)?;
+        }
+
+        // Lazily fetch details/diff for the selected repo when those views are open.
+        {
+            let app = app_state.lock().unwrap();
+            match app.right_view {
+                RightView::Info => {
+                    if let Some(idx) = app.selected_repo_index() {
+                        let repo = Arc::clone(&app.repos[idx]);
+                        let mut state = repo.lock().unwrap();
+                        if state.details.is_none() && !state.details_loading {
+                            state.details_loading = true;
+                            drop(state);
+                            tokio::spawn(run_repo_details(repo));
+                        }
+                    }
+                }
+                RightView::Diff => {
+                    if let Some(idx) = app.selected_repo_index() {
+                        let repo = Arc::clone(&app.repos[idx]);
+                        let mut state = repo.lock().unwrap();
+                        if state.diff.is_none() {
+                            state.diff = Some(vec!["(loading…)".to_string()]);
+                            drop(state);
+                            tokio::spawn(run_repo_diff(repo));
+                        }
+                    }
+                }
+                RightView::Log => {}
             }
         }
 

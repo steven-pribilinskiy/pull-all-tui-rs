@@ -2,11 +2,14 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{AppState, RepoStatus};
+use crate::app::{AppState, RepoStatus, RightView};
 
 const SPINNER_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
 
@@ -87,6 +90,20 @@ pub fn render(frame: &mut Frame, app: &mut AppState, tick: u64) {
     if app.show_help {
         render_help(frame, app, area);
     }
+}
+
+/// Draw a vertical scrollbar on the right border of `area` when content overflows.
+fn render_scrollbar(frame: &mut Frame, area: Rect, position: usize, total: usize, viewport: usize) {
+    if total <= viewport {
+        return;
+    }
+    let mut state = ScrollbarState::new(total)
+        .position(position)
+        .viewport_content_length(viewport);
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None);
+    frame.render_stateful_widget(scrollbar, area, &mut state);
 }
 
 fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usize {
@@ -199,6 +216,7 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
         list_state.select(Some(visible.len() + 1));
     }
 
+    let total_items = items.len();
     let list = List::new(items)
         .highlight_style(
             Style::default()
@@ -208,8 +226,21 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
         .highlight_symbol("→ ");
 
     frame.render_stateful_widget(list, inner, &mut list_state);
+    render_scrollbar(frame, area, list_state.offset(), total_items, inner.height as usize);
 
     list_state.offset()
+}
+
+/// Human-readable label for a repo's status.
+fn status_label(status: &RepoStatus) -> &'static str {
+    match status {
+        RepoStatus::Queued => "queued",
+        RepoStatus::Running { .. } => "running",
+        RepoStatus::UpToDate => "up-to-date",
+        RepoStatus::Updated => "updated",
+        RepoStatus::Skipped => "skipped",
+        RepoStatus::Failed => "failed",
+    }
 }
 
 fn render_preview(frame: &mut Frame, app: &AppState, area: Rect, _tick: u64) {
@@ -218,10 +249,24 @@ fn render_preview(frame: &mut Frame, app: &AppState, area: Rect, _tick: u64) {
     // When the Result overlay is active, show the summary regardless of selection.
     let show_result = app.result_overlay || app.selected >= visible.len();
 
-    let (header_text, log_lines, scroll_offset, _auto_scroll) =
-        if !show_result {
-            let repo_idx = visible[app.selected];
-            let state = app.repos[repo_idx].lock().unwrap();
+    // Info view has its own layout (not the scrolling log/diff path).
+    if !show_result && app.right_view == RightView::Info {
+        render_info(frame, app, area, visible[app.selected]);
+        return;
+    }
+
+    let (header_text, content_lines, scroll_offset) = if show_result {
+        (" Result ".to_string(), build_result_summary(app), 0usize)
+    } else {
+        let repo_idx = visible[app.selected];
+        let state = app.repos[repo_idx].lock().unwrap();
+        if app.right_view == RightView::Diff {
+            let lines = state
+                .diff
+                .clone()
+                .unwrap_or_else(|| vec!["(loading…)".to_string()]);
+            (format!(" {} · diff ", state.name), lines, state.preview_scroll)
+        } else {
             let pid_str = match &state.status {
                 RepoStatus::Running { pid } => format!("pid {pid}"),
                 _ => "pid —".to_string(),
@@ -236,26 +281,14 @@ fn render_preview(frame: &mut Frame, app: &AppState, area: Rect, _tick: u64) {
             let header = format!(
                 " {} · {} · {}{} ",
                 state.name,
-                match &state.status {
-                    RepoStatus::Queued => "queued",
-                    RepoStatus::Running { .. } => "running",
-                    RepoStatus::UpToDate => "up-to-date",
-                    RepoStatus::Updated => "updated",
-                    RepoStatus::Skipped => "skipped",
-                    RepoStatus::Failed => "failed",
-                },
+                status_label(&state.status),
                 pid_str,
                 elapsed_str
             );
             let lines: Vec<String> = state.log.lines().iter().cloned().collect();
-            let scroll = state.preview_scroll;
-            let auto = state.auto_scroll;
-            (header, lines, scroll, auto)
-        } else {
-            // Result item
-            let summary = build_result_summary(app);
-            (" Result ".to_string(), summary, 0, true)
-        };
+            (header, lines, state.preview_scroll)
+        }
+    };
 
     let focused = app.preview_focused;
     let border_style = if focused {
@@ -273,25 +306,133 @@ fn render_preview(frame: &mut Frame, app: &AppState, area: Rect, _tick: u64) {
     frame.render_widget(block, area);
 
     let inner_height = inner.height as usize;
-    let total_lines = log_lines.len();
+    let total_lines = content_lines.len();
 
-    // Convert log lines to ratatui Text with ANSI color support
-    let text_lines: Vec<Line> = log_lines
+    // Convert lines to ratatui Text with ANSI color support
+    let text_lines: Vec<Line> = content_lines
         .iter()
         .map(|line| ansi_line_to_ratatui(line))
         .collect();
 
-    // Compute actual scroll: if auto_scroll, pin to bottom
-    let effective_scroll = if scroll_offset > total_lines.saturating_sub(inner_height) {
-        total_lines.saturating_sub(inner_height)
-    } else {
-        scroll_offset
-    };
+    let max_scroll = total_lines.saturating_sub(inner_height);
+    let effective_scroll = scroll_offset.min(max_scroll);
 
     let text = Text::from(text_lines);
     let para = Paragraph::new(text)
         .scroll((effective_scroll as u16, 0))
         .wrap(Wrap { trim: false });
+    frame.render_widget(para, inner);
+    render_scrollbar(frame, area, effective_scroll, total_lines, inner_height);
+}
+
+/// Render the per-repo info view (status, branch, ahead/behind, remote, last commit,
+/// worktrees, changes, path) plus a command-hint footer, for the selected repo.
+fn render_info(frame: &mut Frame, app: &AppState, area: Rect, repo_idx: usize) {
+    let state = app.repos[repo_idx].lock().unwrap();
+
+    let border_style = if app.preview_focused {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .title(format!(" {} · info ", state.name))
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let label = Style::default().fg(Color::DarkGray);
+    let value = Style::default().fg(Color::Gray);
+    let link = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::UNDERLINED);
+
+    let field = |name: &str, text: String| {
+        Line::from(vec![
+            Span::styled(format!("{name:<13}"), label),
+            Span::styled(text, value),
+        ])
+    };
+
+    let elapsed_str = match state.elapsed {
+        Some(elapsed) => format!("{:.2}s", elapsed.as_secs_f64()),
+        None => "—".to_string(),
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(field(
+        "Status",
+        format!("{} · {elapsed_str}", status_label(&state.status)),
+    ));
+    lines.push(field(
+        "Branch",
+        state.branch.clone().unwrap_or_else(|| "—".to_string()),
+    ));
+
+    if let Some(details) = &state.details {
+        let ahead_behind = match (details.ahead, details.behind) {
+            (Some(ahead), Some(behind)) => format!("↑{ahead}  ↓{behind}"),
+            _ => "(no upstream)".to_string(),
+        };
+        lines.push(field("Ahead/behind", ahead_behind));
+        if details.commit_hash.is_empty() {
+            lines.push(field("Last commit", "—".to_string()));
+        } else {
+            lines.push(field("Last commit", details.commit_hash.clone()));
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<13}", ""), label),
+                Span::styled(format!("{}  ", details.commit_subject), value),
+                Span::styled(
+                    format!("({}, {})", details.commit_rel_date, details.commit_author),
+                    label,
+                ),
+            ]));
+        }
+        lines.push(field(
+            "Changes",
+            format!(
+                "{} uncommitted · {} stashed",
+                details.dirty_count, details.stash_count
+            ),
+        ));
+    } else {
+        lines.push(field("Ahead/behind", "(loading…)".to_string()));
+        lines.push(field("Last commit", "(loading…)".to_string()));
+        lines.push(field("Changes", "(loading…)".to_string()));
+    }
+
+    match &state.remote_url {
+        Some(url) => lines.push(Line::from(vec![
+            Span::styled(format!("{:<13}", "Remote"), label),
+            Span::styled(url.clone(), link),
+        ])),
+        None => lines.push(field("Remote", "(none)".to_string())),
+    }
+
+    let worktrees: Vec<String> = app
+        .worktrees
+        .iter()
+        .filter(|entry| entry.repo == state.name)
+        .map(|entry| entry.branch.clone())
+        .collect();
+    lines.push(field(
+        "Worktrees",
+        if worktrees.is_empty() {
+            "—".to_string()
+        } else {
+            worktrees.join(", ")
+        },
+    ));
+    lines.push(field("Path", state.path.display().to_string()));
+
+    lines.push(Line::from(String::new()));
+    lines.push(Line::from(Span::styled(
+        "o open · y/Y copy · d diff · c claude · x clear",
+        label,
+    )));
+
+    let para = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
 }
 
@@ -484,7 +625,7 @@ fn render_status_bar(frame: &mut Frame, app: &AppState, area: Rect) {
             _ => String::new(),
         };
         format!(
-            "{filter_tag}j/k ↑/↓ move · g/G top/end · click select · wheel scroll · space result · ? help"
+            "{filter_tag}j/k ↑/↓ move · g/G top/end · click select · space result · i info · ? help"
         )
     };
 
@@ -548,7 +689,6 @@ fn render_help(frame: &mut Frame, app: &mut AppState, area: Rect) {
     let link_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::UNDERLINED);
-    let dim_style = Style::default().fg(Color::DarkGray);
 
     // Each item is a line plus an optional URL that makes the whole row clickable.
     let mut items: Vec<(Line<'static>, Option<String>)> = Vec::new();
@@ -596,48 +736,14 @@ fn render_help(frame: &mut Frame, app: &mut AppState, area: Rect) {
     items.push(plain("  View     space result overlay  ·  tab list/preview focus  ·  PgUp/PgDn scroll preview  ·  End resume autoscroll"));
     items.push(plain("  Retry    r selected · R all          (repos that failed or were skipped)"));
     items.push(plain("  Refetch  f selected · F all          (re-pull anything; skips in-progress)"));
+    items.push(plain("  Repo     i info · d diff · o open remote · y/Y copy path/url · c claude · x clear log"));
     items.push(plain("  Layout   [ ] resize panes  ·  drag the divider to resize"));
     items.push(plain("  Filter   / filter by name  ·  Esc clear filter"));
-    items.push(plain("  Other    c clear log  ·  ? this help  ·  q quit  ·  Ctrl-C exit"));
+    items.push(plain("  Other    ? this help  ·  q quit  ·  Ctrl-C exit"));
     items.push(plain(""));
 
     items.push(header("EXIT CODES"));
     items.push(plain("  0 all ok  ·  1 any failed  ·  2 quit mid-run  ·  130 Ctrl-C"));
-    items.push(plain(""));
-
-    items.push(header("REPOSITORIES  (click a row to open it on its host)"));
-    let name_pad = app
-        .repos
-        .iter()
-        .map(|repo| repo.lock().unwrap().name.chars().count())
-        .max()
-        .unwrap_or(0)
-        .min(30);
-    for repo in &app.repos {
-        let state = repo.lock().unwrap();
-        let name = state.name.clone();
-        let branch = state.branch.clone().unwrap_or_else(|| "?".to_string());
-        let prefix = Span::styled(format!("  {name:<name_pad$}  "), label_style);
-        let branch_span = Span::styled(format!("{branch:<16}"), Style::default().fg(Color::Cyan));
-        match &state.remote_url {
-            Some(url) => {
-                let line = Line::from(vec![
-                    prefix,
-                    branch_span,
-                    Span::styled(url.clone(), link_style),
-                ]);
-                items.push((line, Some(url.clone())));
-            }
-            None => {
-                let line = Line::from(vec![
-                    prefix,
-                    branch_span,
-                    Span::styled("(no remote)".to_string(), dim_style),
-                ]);
-                items.push((line, None));
-            }
-        }
-    }
 
     let modal_width = area.width.saturating_sub(4).min(110).max(40);
     let modal_height = area.height.saturating_sub(2).max(8);
@@ -671,4 +777,5 @@ fn render_help(frame: &mut Frame, app: &mut AppState, area: Rect) {
     frame.render_widget(Clear, modal_area);
     frame.render_widget(block, modal_area);
     frame.render_widget(Paragraph::new(lines), inner);
+    render_scrollbar(frame, modal_area, app.help_scroll, items.len(), inner_height);
 }

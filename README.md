@@ -73,8 +73,13 @@ The backends live in `pull-all-siblings/` next to the `pull-all` binary (e.g. `~
 | `R` | Retry all repos with an issue (failed or skipped) |
 | `f` | Refetch selected repo (re-pull regardless of status, unless it's in progress) |
 | `F` | Refetch all repos that aren't currently in progress |
-| `c` | Clear log buffer for selected repo |
-| `?` | Open the help modal (clickable repo/notes/GitHub links, all keys, flags & env) |
+| `i` | Toggle the per-repo info panel (status, branch, ahead/behind, remote, last commit, worktrees, changes, path) |
+| `d` | Toggle the per-repo diff view (working-tree changes, or the last pull's diff) |
+| `o` | Open the selected repo's remote in the browser |
+| `y` / `Y` | Copy the selected repo's path / remote URL to the clipboard |
+| `c` | Start claude code in the selected repo (suspends the TUI, returns on exit) |
+| `x` | Clear log buffer for selected repo |
+| `?` | Open the help modal (GitHub/notes links, all keys, flags & env) |
 | `/` | Filter repos by name |
 | `Esc` | Clear filter (or quit when no filter) |
 | `q` | Quit |
@@ -82,9 +87,15 @@ The backends live in `pull-all-siblings/` next to the `pull-all` binary (e.g. `~
 
 **Retry vs refetch:** retry only re-runs repos that need it (failed/skipped); refetch re-runs any repo even if it was already up to date. In the status bar, `r`/`R` dim when no repo has an issue, and `f`/`F` dim when there's nothing eligible (the selected repo is still in progress).
 
+The repo list, the log/diff preview, and the help modal all show a scrollbar when their content overflows.
+
+### Info panel (`i`)
+
+`i` swaps the right pane between the pull log and an info view for the selected repo: status + elapsed, branch, ahead/behind vs upstream, remote, last commit (hash · subject · author · relative date), worktrees, uncommitted/stash counts, and the local path. The extra git facts are fetched lazily for the selected repo only. Any navigation returns the pane to the log. `c` starts claude code (`cc`, i.e. `claude --dangerously-skip-permissions`, in the repo dir; override with `PULL_CLAUDE_CMD`).
+
 ### Help modal (`?`)
 
-`?` opens an in-app reference: links to this repo on GitHub and the design notes on `notes.lvh.me`, the `go`/`bun`/`cli` subcommands, every flag and environment variable, the hotkeys grouped by purpose, exit codes, and the full repo list — each repo row and link is clickable (opens in your browser via `$BROWSER`/`wslview`/`xdg-open`). Scroll with `j`/`k`, `g`/`G`, `PgUp`/`PgDn`, or the wheel; close with `?`/`Esc`/`q`.
+`?` opens an in-app reference: links to this repo on GitHub and the design notes on `notes.lvh.me`, the `go`/`bun`/`cli` subcommands, every flag and environment variable, the hotkeys grouped by purpose, and exit codes. The links are clickable (open in your browser via `$BROWSER`/`wslview`/`xdg-open`). Scroll with `j`/`k`, `g`/`G`, `PgUp`/`PgDn`, or the wheel; close with `?`/`Esc`/`q`.
 
 ### Mouse
 
