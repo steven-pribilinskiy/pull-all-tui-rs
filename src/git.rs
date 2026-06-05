@@ -556,11 +556,50 @@ pub async fn checkout_branch(dir: &Path, branch: &str) -> Result<(), String> {
     }
 }
 
-/// Safe-delete `branch` (`git branch -d`, refuses unmerged branches).
-pub async fn delete_branch(dir: &Path, branch: &str) -> Result<(), String> {
+/// Delete `branch`: `git branch -d` (safe, refuses unmerged) or `-D` (force) when `force`.
+pub async fn delete_branch(dir: &Path, branch: &str, force: bool) -> Result<(), String> {
     let dir_str = dir.to_str().unwrap_or(".");
+    let flag = if force { "-D" } else { "-d" };
     let output = Command::new("git")
-        .args(["-C", dir_str, "branch", "-d", branch])
+        .args(["-C", dir_str, "branch", flag, branch])
+        .output()
+        .await
+        .map_err(|err| err.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+/// Drop a stash entry (`git stash drop stash@{index}`).
+pub async fn drop_stash(dir: &Path, index: usize) -> Result<(), String> {
+    let dir_str = dir.to_str().unwrap_or(".");
+    let stash_ref = format!("stash@{{{index}}}");
+    let output = Command::new("git")
+        .args(["-C", dir_str, "stash", "drop", &stash_ref])
+        .output()
+        .await
+        .map_err(|err| err.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+/// Remove a worktree (`git worktree remove [--force] <path>`). Without `force`, git refuses
+/// when the worktree has uncommitted/untracked changes or is locked.
+pub async fn remove_worktree(dir: &Path, path: &Path, force: bool) -> Result<(), String> {
+    let dir_str = dir.to_str().unwrap_or(".");
+    let path_str = path.to_str().unwrap_or_default();
+    let mut args = vec!["-C", dir_str, "worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(path_str);
+    let output = Command::new("git")
+        .args(&args)
         .output()
         .await
         .map_err(|err| err.to_string())?;

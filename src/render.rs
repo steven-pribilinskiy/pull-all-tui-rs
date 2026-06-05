@@ -863,7 +863,7 @@ fn render_status_bar(frame: &mut Frame, app: &mut AppState, area: Rect) {
             ("f".to_string(), style_refetch_one, Some(Command::Refetch)),
             ("/".to_string(), hint, None),
             ("F".to_string(), style_refetch_all, Some(Command::RefetchAll)),
-            (" refetch · / filter · [ ] / drag resize · tab focus · ".to_string(), hint, None),
+            (" refetch · / filter · [ ] or drag resize · tab focus · ".to_string(), hint, None),
             ("q".to_string(), active, Some(Command::Quit)),
             (" quit".to_string(), hint, None),
             (stats, hint, None),
@@ -956,9 +956,9 @@ fn render_help(frame: &mut Frame, app: &mut AppState, area: Rect) {
     items.push(plain("  Refetch  f selected · F all          (re-pull anything; skips in-progress)"));
     items.push(plain("  Repo     i info · I pin info · d diff · o open in browser · y/Y copy path/url · c claude · x clear log"));
     items.push(plain("  Cols     t toggle mode (stays on) · a/d/l/w/s columns (ahead-behind/dirty/last-commit/worktrees/stashes) · Esc done"));
-    items.push(plain("  Page     enter open repo · p pull branch · P pull all branches · o open in browser · D delete · Home/End jump · esc back"));
+    items.push(plain("  Page     enter open repo · p pull branch · P pull all branches · o open in browser · d delete branch / drop stash / remove worktree (confirm) · Home/End jump · esc back"));
     items.push(plain("  Stash    STASHES section lists stashes · ● marks dirty branches/worktrees"));
-    items.push(plain("  Diff     enter/double-click a stash or dirty row → 90% diff modal · t toggle uncommitted⇄base · ↑↓/PgUp/PgDn/Home/End scroll · esc close"));
+    items.push(plain("  Diff     enter/double-click a stash or dirty row → 90% diff modal · t toggle uncommitted⇄base · d drop/remove (confirm) · ↑↓/PgUp/PgDn/Home/End scroll · esc close"));
     items.push(plain("  Layout   [ ] resize panes  ·  drag the divider to resize"));
     items.push(plain("  Filter   / filter by name  ·  Esc clear filter"));
     items.push(plain("  Other    ? this help  ·  q quit  ·  Ctrl-C exit"));
@@ -1021,7 +1021,7 @@ fn render_diff_modal(frame: &mut Frame, app: &mut AppState, area: Rect) {
         let (title, footer) = match &modal.source {
             DiffSource::Stash { index, label, .. } => (
                 format!(" stash@{{{index}}} · {} ", truncate_str(label, 60)),
-                " ↑↓ · PgUp/PgDn · Home/End · esc close ".to_string(),
+                " ↑↓ · PgUp/PgDn · Home/End · d drop · esc close ".to_string(),
             ),
             DiffSource::Dirty { name, .. } => {
                 let mode = match modal.mode {
@@ -1030,7 +1030,7 @@ fn render_diff_modal(frame: &mut Frame, app: &mut AppState, area: Rect) {
                 };
                 (
                     format!(" {name} · {mode} "),
-                    " ↑↓ · PgUp/PgDn · Home/End · t toggle uncommitted⇄base · esc close ".to_string(),
+                    " ↑↓ · PgUp/PgDn · Home/End · t toggle uncommitted⇄base · d drop/remove · esc close ".to_string(),
                 )
             }
         };
@@ -1130,7 +1130,7 @@ fn render_repo_page(frame: &mut Frame, app: &mut AppState, area: Rect) {
         .border_style(Style::default().fg(Color::Cyan))
         .title(title)
         .title_bottom(
-            Line::from(" ↑↓ move · Home/End · enter checkout · enter/dbl-click diff (stash/dirty) · p pull · P pull all · c claude · o open · y copy · D delete · esc back ")
+            Line::from(" ↑↓ move · Home/End · enter checkout · enter/dbl-click diff (stash/dirty) · p pull · P pull all · c claude · o open · y copy · d delete/drop · esc back ")
                 .right_aligned(),
         );
     let inner = block.inner(area);
@@ -1272,22 +1272,38 @@ fn render_confirm(frame: &mut Frame, app: &AppState, area: Rect) {
         return;
     };
     let width = (confirm.message.chars().count() as u16 + 8).clamp(30, area.width.saturating_sub(4).max(30));
-    let modal = centered_rect(width, 6, area);
+    // Destructive actions get a taller, red, warning-laden dialog; safe ones a calm yellow box.
+    let height = if confirm.danger { 7 } else { 6 };
+    let modal = centered_rect(width, height, area);
+    let (border_color, title) = if confirm.danger {
+        (Color::Red, " ⚠ Confirm — destructive ")
+    } else {
+        (Color::Yellow, " Confirm ")
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red))
-        .title(" Confirm ");
+        .border_style(Style::default().fg(border_color))
+        .title(title);
     let inner = block.inner(modal);
     frame.render_widget(Clear, modal);
     frame.render_widget(block, modal);
-    let lines = vec![
+    let mut lines = vec![
         Line::from(String::new()),
         Line::from(Span::styled(
             format!("  {}", confirm.message),
             Style::default().fg(Color::Gray),
         )),
-        Line::from(String::new()),
-        Line::from(Span::styled("  [y] yes     [n] no", Style::default().fg(Color::DarkGray))),
     ];
+    if confirm.danger {
+        lines.push(Line::from(Span::styled(
+            "  ⚠ This cannot be undone.",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+    }
+    lines.push(Line::from(String::new()));
+    lines.push(Line::from(Span::styled(
+        "  [y] yes     [n] no",
+        Style::default().fg(Color::DarkGray),
+    )));
     frame.render_widget(Paragraph::new(lines), inner);
 }

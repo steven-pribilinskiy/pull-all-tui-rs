@@ -27,13 +27,13 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use app::{
-    AppState, Column, Command as Cmd, ConfirmAction, ConfirmDialog, Leader, PageRowKind, RepoState,
-    RepoStatus, RightView, SharedRepoState,
+    AppState, Column, Command as Cmd, ConfirmAction, ConfirmDialog, DiffSource, Leader, PageRow,
+    PageRowKind, RepoState, RepoStatus, RightView, SharedRepoState,
 };
 use worker::{
-    run_all_details, run_all_pulls, run_checkout, run_delete, run_pull_all_branches,
-    run_diff_modal, run_pull_branch, run_remote_url_discovery, run_repo_details, run_repo_diff,
-    run_repo_page, run_worktree_discovery,
+    run_all_details, run_all_pulls, run_checkout, run_delete, run_diff_modal, run_drop_stash,
+    run_pull_all_branches, run_pull_branch, run_remote_url_discovery, run_remove_worktree,
+    run_repo_details, run_repo_diff, run_repo_page, run_worktree_discovery,
 };
 
 /// Interactive multi-repo git pull dashboard.
@@ -253,6 +253,58 @@ fn dispatch_command(command: Cmd, app: &mut AppState, retry_queue: &mut Vec<usiz
         }
     }
     None
+}
+
+/// Build the confirm dialog for clearing/deleting a repo-page row. Returns None for the HEAD
+/// branch (which can't be deleted); the danger flag scales the dialog's severity.
+fn confirm_for_row(repo_idx: usize, row: &PageRow) -> Option<ConfirmDialog> {
+    match row.kind {
+        PageRowKind::Stash => {
+            let index = row.stash_index?;
+            Some(ConfirmDialog {
+                message: format!("Drop stash@{{{index}}}? Stashed changes will be lost."),
+                action: ConfirmAction::DropStash { repo_idx, index },
+                danger: true,
+            })
+        }
+        PageRowKind::Worktree => {
+            let mut message = format!("Remove worktree {}?", row.path.display());
+            if row.dirty {
+                message.push_str(" Uncommitted changes will be LOST.");
+            }
+            Some(ConfirmDialog {
+                message,
+                action: ConfirmAction::RemoveWorktree {
+                    repo_idx,
+                    path: row.path.clone(),
+                    force: row.dirty,
+                },
+                danger: row.dirty,
+            })
+        }
+        PageRowKind::Branch if row.is_head => None,
+        PageRowKind::Branch if row.deletable => Some(ConfirmDialog {
+            message: format!("Delete branch '{}'?", row.branch),
+            action: ConfirmAction::DeleteBranch {
+                repo_idx,
+                branch: row.branch.clone(),
+                force: false,
+            },
+            danger: false,
+        }),
+        PageRowKind::Branch => Some(ConfirmDialog {
+            message: format!(
+                "Force-delete unmerged branch '{}'? Unmerged commits will be lost.",
+                row.branch
+            ),
+            action: ConfirmAction::DeleteBranch {
+                repo_idx,
+                branch: row.branch.clone(),
+                force: true,
+            },
+            danger: true,
+        }),
+    }
 }
 
 async fn run() -> Result<i32> {
@@ -734,10 +786,21 @@ async fn run_event_loop(
                     match key.code {
                         KeyCode::Char('y') | KeyCode::Enter => {
                             let action = app.confirm.take().map(|dialog| dialog.action);
-                            if let Some(ConfirmAction::DeleteBranch { repo_idx, branch }) = action {
+                            if let Some(action) = action {
                                 let app_state_clone = Arc::clone(&app_state);
                                 drop(app);
-                                tokio::spawn(run_delete(app_state_clone, repo_idx, branch));
+                                match action {
+                                    ConfirmAction::DeleteBranch { repo_idx, branch, force } => {
+                                        tokio::spawn(run_delete(app_state_clone, repo_idx, branch, force));
+                                    }
+                                    ConfirmAction::DropStash { repo_idx, index } => {
+                                        tokio::spawn(run_drop_stash(app_state_clone, repo_idx, index));
+                                    }
+                                    ConfirmAction::RemoveWorktree { repo_idx, path, force } => {
+                                        tokio::spawn(run_remove_worktree(app_state_clone, repo_idx, path, force));
+                                    }
+                                }
+                                continue;
                             }
                         }
                         KeyCode::Char('n') | KeyCode::Char('q') | KeyCode::Esc => {
@@ -788,6 +851,44 @@ async fn run_event_loop(
                                 drop(app);
                                 tokio::spawn(run_diff_modal(app_state_clone));
                                 continue;
+                            }
+                        }
+                        // Clear/delete what the modal is showing: close the modal, then raise the
+                        // confirm dialog over the repo page.
+                        KeyCode::Char('d') => {
+                            let source = app.diff_modal.as_ref().map(|modal| modal.source.clone());
+                            app.diff_modal = None;
+                            if let (Some(idx), Some(source)) = (app.repo_page, source) {
+                                let repo_path = app.repos[idx].lock().unwrap().path.clone();
+                                match source {
+                                    DiffSource::Stash { index, .. } => {
+                                        app.confirm = Some(ConfirmDialog {
+                                            message: format!(
+                                                "Drop stash@{{{index}}}? Stashed changes will be lost."
+                                            ),
+                                            action: ConfirmAction::DropStash { repo_idx: idx, index },
+                                            danger: true,
+                                        });
+                                    }
+                                    DiffSource::Dirty { path, .. } if path == repo_path => {
+                                        app.repo_page_message =
+                                            Some("can't delete the current branch".to_string());
+                                    }
+                                    DiffSource::Dirty { path, .. } => {
+                                        app.confirm = Some(ConfirmDialog {
+                                            message: format!(
+                                                "Remove worktree {}? Uncommitted changes will be LOST.",
+                                                path.display()
+                                            ),
+                                            action: ConfirmAction::RemoveWorktree {
+                                                repo_idx: idx,
+                                                path,
+                                                force: true,
+                                            },
+                                            danger: true,
+                                        });
+                                    }
+                                }
                             }
                         }
                         _ => {}
@@ -843,24 +944,15 @@ async fn run_event_loop(
                                 }
                             }
                         }
-                        // Delete the selected branch (clean-only) after a confirmation dialog.
-                        KeyCode::Char('D') => {
+                        // Clear/delete the selected row (stash drop / worktree remove / branch
+                        // delete) after a confirmation dialog whose severity scales with danger.
+                        KeyCode::Char('d') => {
                             if let (Some(idx), Some(row)) = (app.repo_page, app.repo_page_target()) {
-                                if row.kind == PageRowKind::Branch {
-                                    if row.deletable {
-                                        app.confirm = Some(ConfirmDialog {
-                                            message: format!("Delete branch '{}'?", row.branch),
-                                            action: ConfirmAction::DeleteBranch {
-                                                repo_idx: idx,
-                                                branch: row.branch,
-                                            },
-                                        });
-                                    } else {
-                                        app.repo_page_message = Some(format!(
-                                            "'{}' not deletable (current branch or unpushed commits)",
-                                            row.branch
-                                        ));
-                                    }
+                                if let Some(dialog) = confirm_for_row(idx, &row) {
+                                    app.confirm = Some(dialog);
+                                } else if row.kind == PageRowKind::Branch && row.is_head {
+                                    app.repo_page_message =
+                                        Some("can't delete the current branch".to_string());
                                 }
                             }
                         }

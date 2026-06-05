@@ -11,9 +11,9 @@ use crate::app::{
 };
 use crate::git::{
     base_branch_diff, checkout_branch, classify_pull_output, delete_branch, diff_stat,
-    discover_worktrees, fetch_ff_branch, fetch_remote, get_branch, get_diff, get_remote_url,
-    get_repo_details, is_dirty, list_local_branches, list_stashes, list_worktrees,
-    pull_all_branches, pull_ff_only, stash_diff, uncommitted_diff, PullOutcome,
+    discover_worktrees, drop_stash, fetch_ff_branch, fetch_remote, get_branch, get_diff,
+    get_remote_url, get_repo_details, is_dirty, list_local_branches, list_stashes, list_worktrees,
+    pull_all_branches, pull_ff_only, remove_worktree, stash_diff, uncommitted_diff, PullOutcome,
 };
 
 /// Pull a single repository, updating `repo_state` as progress arrives.
@@ -326,16 +326,67 @@ pub async fn run_checkout(app_state: Arc<Mutex<AppState>>, repo_idx: usize, bran
     }
 }
 
-/// Delete a branch (safe `-d`), set a result banner, and reload the repo's page.
-pub async fn run_delete(app_state: Arc<Mutex<AppState>>, repo_idx: usize, branch: String) {
+/// Delete a branch (`-d`, or `-D` when `force`), set a result banner, refresh details, and
+/// reload the repo's page.
+pub async fn run_delete(app_state: Arc<Mutex<AppState>>, repo_idx: usize, branch: String, force: bool) {
     let path = { app_state.lock().unwrap().repos[repo_idx].lock().unwrap().path.clone() };
-    let result = delete_branch(&path, &branch).await;
-    let mut app = app_state.lock().unwrap();
-    app.repo_page_message = Some(match result {
+    let result = delete_branch(&path, &branch, force).await;
+    let message = match &result {
         Ok(()) => format!("Deleted {branch}"),
         Err(err) => format!("delete failed: {err}"),
-    });
-    app.repos[repo_idx].lock().unwrap().page = None;
+    };
+    finish_repo_mutation(&app_state, repo_idx, &path, result.is_ok(), message).await;
+}
+
+/// Drop a stash, set a result banner, refresh details (so the main-list stash column updates),
+/// and reload the repo's page.
+pub async fn run_drop_stash(app_state: Arc<Mutex<AppState>>, repo_idx: usize, index: usize) {
+    let path = { app_state.lock().unwrap().repos[repo_idx].lock().unwrap().path.clone() };
+    let result = drop_stash(&path, index).await;
+    let message = match &result {
+        Ok(()) => format!("Dropped stash@{{{index}}}"),
+        Err(err) => format!("drop failed: {err}"),
+    };
+    finish_repo_mutation(&app_state, repo_idx, &path, result.is_ok(), message).await;
+}
+
+/// Remove a worktree (force when `force`), set a result banner, refresh details, and reload.
+pub async fn run_remove_worktree(
+    app_state: Arc<Mutex<AppState>>,
+    repo_idx: usize,
+    worktree_path: std::path::PathBuf,
+    force: bool,
+) {
+    let path = { app_state.lock().unwrap().repos[repo_idx].lock().unwrap().path.clone() };
+    let result = remove_worktree(&path, &worktree_path, force).await;
+    let message = match &result {
+        Ok(()) => format!("Removed worktree {}", worktree_path.display()),
+        Err(err) => format!("remove failed: {err}"),
+    };
+    finish_repo_mutation(&app_state, repo_idx, &path, result.is_ok(), message).await;
+}
+
+/// Set the repo-page banner; on success refresh cached details (for the main-list columns) and
+/// drop the cached page so it reloads.
+async fn finish_repo_mutation(
+    app_state: &Arc<Mutex<AppState>>,
+    repo_idx: usize,
+    path: &std::path::Path,
+    success: bool,
+    message: String,
+) {
+    let new_details = if success {
+        Some(get_repo_details(path).await)
+    } else {
+        None
+    };
+    let mut app = app_state.lock().unwrap();
+    app.repo_page_message = Some(message);
+    let mut state = app.repos[repo_idx].lock().unwrap();
+    if let Some(details) = new_details {
+        state.details = Some(details);
+    }
+    state.page = None;
 }
 
 /// Fast-forward the selected repo-page row (a single branch or worktree), set a result

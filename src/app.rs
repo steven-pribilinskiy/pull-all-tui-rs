@@ -229,7 +229,9 @@ pub enum Command {
 /// What a confirmation dialog will do when accepted.
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    DeleteBranch { repo_idx: usize, branch: String },
+    DeleteBranch { repo_idx: usize, branch: String, force: bool },
+    DropStash { repo_idx: usize, index: usize },
+    RemoveWorktree { repo_idx: usize, path: PathBuf, force: bool },
 }
 
 /// A yes/no confirmation modal.
@@ -237,6 +239,8 @@ pub enum ConfirmAction {
 pub struct ConfirmDialog {
     pub message: String,
     pub action: ConfirmAction,
+    /// Destructive (loses uncommitted/unmerged work) — rendered with a scarier dialog.
+    pub danger: bool,
 }
 
 /// Ring buffer capped at `RING_BUFFER_CAPACITY` lines.
