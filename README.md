@@ -56,6 +56,8 @@ A directory literally named `go`/`bun`/`cli` is still reachable as `pull-all ./g
 
 The backends live in `pull-all-siblings/` next to the `pull-all` binary (e.g. `~/bin/pull-all-siblings/`), deliberately **off `$PATH`** so they aren't top-level commands — they're reachable only through `pull-all go|bun|cli`. The dispatcher resolves them relative to its own location and falls back to `$PATH` if that directory is absent.
 
+The `cli` backend (`pull-all-repos`, the original parallel-pull bash script that `src/plain.rs` was ported from) is tracked in this repo under [`pull-all-siblings/`](pull-all-siblings/) and deployed by `make install`. The `go` and `bun` backends are built from their own source trees.
+
 ## Keybindings
 
 | Key | Action |

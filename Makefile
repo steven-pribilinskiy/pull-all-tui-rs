@@ -6,6 +6,8 @@ build:
 
 install: build
 	cp target/release/pull-all $(HOME)/bin/pull-all
+	mkdir -p $(HOME)/bin/pull-all-siblings
+	cp pull-all-siblings/pull-all-repos $(HOME)/bin/pull-all-siblings/pull-all-repos
 
 test:
 	cargo test

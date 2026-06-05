@@ -1,0 +1,191 @@
+#!/bin/bash
+# Pull every git repo in the current directory in parallel.
+# Skips repos with uncommitted changes; reports updated / up-to-date / skipped / failed.
+# Also lists active git worktrees rooted under <repo>.worktrees/<branch>/.
+# Output is printed in alphabetical order (pulls run in parallel; output is buffered
+# per repo and flushed as each one becomes the next alphabetical entry to complete).
+
+source ~/bin/bash-profile.sh pull-all-repos
+
+echo "🔄 Pulling all repositories in $(basename "$PWD")..."
+
+tmpdir=$(mktemp -d)
+bash_profile_on_exit "rm -rf '$tmpdir'"
+
+# Discover active worktrees in the background while pulls run. The pattern
+# `<repo>.worktrees/<branch>/.git` is a fixed 3-level glob — bash won't
+# recurse into node_modules or .git interiors. nullglob is scoped to the
+# subshell so the parent shell's glob behavior is unchanged.
+(
+  shopt -s nullglob
+  for git_dir in *.worktrees/*/.git; do
+    wt_dir="${git_dir%/.git}"
+    repo="${wt_dir%%.worktrees*}"
+    branch=$(git -C "$wt_dir" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    printf '%s\t%s\n' "$repo" "$branch"
+  done
+) > "$tmpdir/worktrees.tsv" &
+worktree_pid=$!
+
+pull_repo() {
+  local dir=$1
+  local outf=$tmpdir/$dir.out
+  local statef=$tmpdir/$dir.state
+
+  if [[ ! -d "$dir/.git" ]]; then
+    return
+  fi
+
+  (cd "$dir" && git rev-parse --abbrev-ref HEAD 2>/dev/null) > "$tmpdir/$dir.branch"
+
+  if (cd "$dir" && [[ -n "$(git status --porcelain)" ]]); then
+    {
+      echo "⚠️  Skipping $dir (has uncommitted changes)"
+    } > "$outf"
+    echo "skipped" > "$statef"
+    return
+  fi
+
+  # Redirect git's stdout/stderr to a tempfile (not a $(...) pipe).
+  # Reason: git-over-ssh spawns an SSH ControlMaster daemon that inherits the
+  # write end of the capture pipe. The daemon outlives `git pull`, the pipe
+  # never reaches EOF, and command substitution hangs forever.
+  local logf=$tmpdir/$dir.log
+  (cd "$dir" && timeout 30 git pull --ff-only </dev/null) >"$logf" 2>&1
+  local exit_code=$?
+
+  {
+    if [[ $exit_code -eq 0 ]]; then
+      if grep -q "Already up to date" "$logf"; then
+        echo "✅ $dir"
+        echo "uptodate" > "$statef"
+      else
+        echo "✅ $dir"
+        (cd "$dir" && git diff --stat --color=always HEAD@{1} HEAD 2>/dev/null)
+        echo
+        echo "updated" > "$statef"
+      fi
+    else
+      echo "❌ Failed: $dir"
+      sed 's/^/   /' "$logf"
+      echo
+      echo "failed" > "$statef"
+    fi
+  } > "$outf"
+}
+
+# Collect repo dirs in alphabetical order first (bash glob expands sorted).
+dirs=()
+for dir in */; do
+  dir=${dir%/}
+  [[ "$dir" == *".worktrees"* ]] && continue
+  [[ ! -d "$dir/.git" ]] && continue
+  dirs+=("$dir")
+done
+
+# Launch all pulls in parallel with a concurrency cap. Each writes to its own
+# output buffer; nothing is printed yet.
+declare -A repo_pid
+max_jobs=${PULL_JOBS:-$(nproc)}
+running=0
+for dir in "${dirs[@]}"; do
+  pull_repo "$dir" &
+  repo_pid[$dir]=$!
+  running=$((running + 1))
+  if (( running >= max_jobs )); then
+    wait -n
+    running=$((running - 1))
+  fi
+done
+
+# Flush output in alphabetical order. `wait` on each repo's PID blocks until
+# that specific repo's pull finishes, then we cat its buffered output.
+for dir in "${dirs[@]}"; do
+  wait "${repo_pid[$dir]}" 2>/dev/null
+  [[ -f "$tmpdir/$dir.out" ]] && cat "$tmpdir/$dir.out"
+done
+
+echo ""
+echo "🎉 Pull completed!"
+
+skipped=()
+failed=()
+updated=()
+uptodate=()
+for dir in "${dirs[@]}"; do
+  f=$tmpdir/$dir.state
+  [[ -f "$f" ]] || continue
+  case $(cat "$f") in
+    skipped)  skipped+=("$dir") ;;
+    failed)   failed+=("$dir") ;;
+    updated)  updated+=("$dir") ;;
+    uptodate) uptodate+=("$dir") ;;
+  esac
+done
+
+total=$((${#updated[@]} + ${#uptodate[@]} + ${#skipped[@]} + ${#failed[@]}))
+if (( total == 0 )); then
+  echo ""
+  echo "   No git repositories found in $(basename "$PWD")."
+  exit 0
+fi
+parts=()
+(( ${#updated[@]} > 0 ))  && parts+=("${#updated[@]} updated")
+(( ${#uptodate[@]} > 0 )) && parts+=("${#uptodate[@]} up-to-date")
+(( ${#skipped[@]} > 0 ))  && parts+=("${#skipped[@]} skipped")
+(( ${#failed[@]} > 0 ))   && parts+=("${#failed[@]} failed")
+echo ""
+summary=$(printf ', %s' "${parts[@]}")
+echo "   $total total: ${summary:2}"
+
+# Worktree discovery was launched in the background at script start;
+# wait for it (will already be done long before the slowest pull) and
+# load the (repo, branch) pairs from the TSV so we can include them in
+# the alignment width calculation alongside the main repos.
+wait "$worktree_pid" 2>/dev/null
+wt_repos=()
+wt_branches=()
+if [[ -s "$tmpdir/worktrees.tsv" ]]; then
+  while IFS=$'\t' read -r repo branch; do
+    wt_repos+=("$repo")
+    wt_branches+=("$branch")
+  done < "$tmpdir/worktrees.tsv"
+fi
+
+# Pad all listed names to the longest name across every section so branch
+# columns align consistently.
+pad=0
+for name in "${dirs[@]}" "${wt_repos[@]}"; do
+  (( ${#name} > pad )) && pad=${#name}
+done
+
+branch_for() {
+  local b
+  b=$(cat "$tmpdir/$1.branch" 2>/dev/null)
+  echo "${b:-?}"
+}
+
+print_section() {
+  local header=$1
+  shift
+  local list=("$@")
+  (( ${#list[@]} > 0 )) || return 0
+  echo ""
+  echo "$header"
+  for d in "${list[@]}"; do
+    printf '   - %-*s  %s\n' "$pad" "$d" "$(branch_for "$d")"
+  done
+}
+
+print_section "✨ Updated repositories:"                 "${updated[@]}"
+print_section "📦 Unchanged repositories:"               "${uptodate[@]}"
+print_section "⚠️  Skipped repositories (uncommitted changes):" "${skipped[@]}"
+print_section "❌ Failed repositories:"                  "${failed[@]}"
+
+if (( ${#wt_repos[@]} > 0 )); then
+  echo ""
+  echo "🌳 Active worktrees:"
+  for i in "${!wt_repos[@]}"; do
+    printf '   - %-*s  %s\n' "$pad" "${wt_repos[$i]}" "${wt_branches[$i]}"
+  done
+fi
