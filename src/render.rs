@@ -370,12 +370,13 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
         Style::default().fg(Color::DarkGray),
     )])));
 
+    let result_icons = app.icons();
     let result_glyph = if app.all_done {
         let (_, _, _, _, _, failed) = app.counts();
         if failed > 0 {
-            Span::styled("✗", Style::default().fg(Color::Red))
+            Span::styled(result_icons.failed, Style::default().fg(Color::Red))
         } else {
-            Span::styled("✓", Style::default().fg(Color::Green))
+            Span::styled(result_icons.ok, Style::default().fg(Color::Green))
         }
     } else {
         Span::styled("—", Style::default().fg(Color::DarkGray))
@@ -396,7 +397,7 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
             Style::default().fg(Color::DarkGray),
         )])));
         items.push(ListItem::new(Line::from(vec![
-            Span::styled("✗", Style::default().fg(Color::Red)),
+            Span::styled(result_icons.failed, Style::default().fg(Color::Red)),
             Span::raw(" "),
             Span::styled(format!("Errors ({failed})"), Style::default().fg(Color::Red)),
         ])));
@@ -806,18 +807,34 @@ fn build_result_summary(app: &AppState) -> Vec<String> {
         }
     };
 
-    print_section(&mut lines, "+ Updated repositories:", &updated_repos);
-    print_section(&mut lines, "= Unchanged repositories:", &up_to_date_repos);
+    // Section markers: ASCII in Unicode mode, matching status glyphs in emoji mode.
+    let icons = app.icons();
+    let emoji = app.icon_style == crate::app::IconStyle::Emoji;
+    let mark = |ascii: &'static str, glyph: &'static str| if emoji { glyph } else { ascii };
     print_section(
         &mut lines,
-        "! Skipped repositories (uncommitted changes):",
+        &format!("{} Updated repositories:", mark("+", icons.updated)),
+        &updated_repos,
+    );
+    print_section(
+        &mut lines,
+        &format!("{} Unchanged repositories:", mark("=", icons.up_to_date)),
+        &up_to_date_repos,
+    );
+    print_section(
+        &mut lines,
+        &format!("{} Skipped repositories (uncommitted changes):", mark("!", icons.skipped)),
         &skipped_repos,
     );
-    print_section(&mut lines, "x Failed repositories:", &failed_repos);
+    print_section(
+        &mut lines,
+        &format!("{} Failed repositories:", mark("x", icons.failed)),
+        &failed_repos,
+    );
 
     if !app.worktrees.is_empty() {
         lines.push(String::new());
-        lines.push("> Active worktrees:".to_string());
+        lines.push(format!("{} Active worktrees:", mark(">", icons.worktrees)));
         for wt in &app.worktrees {
             lines.push(format!("   - {:<pad$}  {}", wt.repo, wt.branch));
         }
@@ -830,6 +847,7 @@ fn build_result_summary(app: &AppState) -> Vec<String> {
 /// (the git stderr from the final failed attempt).
 fn build_error_summary(app: &AppState) -> Vec<String> {
     const TAIL: usize = 15;
+    let icons = app.icons();
     let mut lines = Vec::new();
     let failed_count = app.counts().5;
     lines.push(format!("{failed_count} repo(s) failed to pull:"));
@@ -841,7 +859,7 @@ fn build_error_summary(app: &AppState) -> Vec<String> {
         }
         let branch = state.branch.clone().unwrap_or_else(|| "?".to_string());
         lines.push(String::new());
-        lines.push(format!("✗ {} ({branch})", state.name));
+        lines.push(format!("{} {} ({branch})", icons.failed, state.name));
         let log: Vec<&String> = state.log.lines().iter().collect();
         let start = log.len().saturating_sub(TAIL);
         if start > 0 {
@@ -1413,9 +1431,10 @@ fn render_repo_page(frame: &mut Frame, app: &mut AppState, area: Rect, tick: u64
     let branch_count = rows.iter().filter(|row| row.kind == PageRowKind::Branch).count();
     let worktree_count = rows.iter().filter(|row| row.kind == PageRowKind::Worktree).count();
     let stash_count = rows.iter().filter(|row| row.kind == PageRowKind::Stash).count();
+    // Fixed 2-cell marker so a 2-wide emoji dot doesn't shift the columns vs clean rows.
     let dirty_marker = |dirty: bool| {
         if dirty {
-            Span::styled(format!(" {}", icons.dirty_marker), Style::default().fg(Color::Red))
+            Span::styled(pad_display(icons.dirty_marker, 2), Style::default().fg(Color::Red))
         } else {
             Span::raw("  ")
         }

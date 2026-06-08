@@ -122,7 +122,7 @@ The list always shows the status glyph + name + branch. Press `t` then a column 
 `,` opens a small settings modal (from the list or the repo page). Move between rows with `j`/`k` (or `↑`/`↓`), toggle the selected setting with `Space`/`Enter`, and close with `Esc`/`q`/`,`. Both settings persist across runs (in `~/.config/pull-all/state.json`):
 
 - **Panel padding** — adds a 1-cell inner padding inside every bordered panel and modal.
-- **Icons** — switches the status / column / marker glyphs between the default Unicode set (`◌ ✓ ⊘ ✗ ⑂ ≡ •`) and an emoji set (`✅ ✨ ⏭️ ❌ 🌿 📦 📝`). The list columns stay aligned in either mode (emoji render double-width).
+- **Icons** — switches the status / column / marker glyphs **everywhere** (list, columns, repo page, Result/Errors pages, log markers) between the default Unicode set (`◌ ✓ ⊘ ✗ ⑂ ≡ •`) and an emoji set (`✅ ✨ 🚫 ❌ 🌿 📦 📝`). Columns stay aligned in either mode — only single-codepoint, reliably-2-cell emoji are used (no variation-selector glyphs), and the tight ahead/behind column keeps compact `↑↓` arrows.
 
 ### Help modal (`?`)
 

@@ -298,6 +298,8 @@ pub struct IconSet {
     pub updated: &'static str,
     pub skipped: &'static str,
     pub failed: &'static str,
+    /// Success check, distinct from `updated` — used for the all-ok Result row.
+    pub ok: &'static str,
     pub dirty: &'static str,
     pub branches: &'static str,
     pub worktrees: &'static str,
@@ -317,6 +319,7 @@ pub static UNICODE_ICONS: IconSet = IconSet {
     updated: "✓",
     skipped: "⊘",
     failed: "✗",
+    ok: "✓",
     dirty: "•",
     branches: "⑂",
     worktrees: "⑂",
@@ -334,8 +337,12 @@ pub static EMOJI_ICONS: IconSet = IconSet {
     queued: "⏳",
     up_to_date: "✅",
     updated: "✨",
-    skipped: "⏭️",
+    // Single-codepoint Emoji_Presentation glyphs only — variation-selector emoji (⏭️, ⚠️) are
+    // 2-char sequences that terminals render at inconsistent widths, breaking column alignment
+    // and desyncing the cursor (garbled/ghosted UI). 🚫 / 🛑 are reliably 2 cells everywhere.
+    skipped: "🚫",
     failed: "❌",
+    ok: "✅",
     dirty: "📝",
     branches: "🌿",
     worktrees: "🌳",
@@ -345,8 +352,8 @@ pub static EMOJI_ICONS: IconSet = IconSet {
     ahead: "↑",
     behind: "↓",
     dirty_marker: "🔴",
-    warning: "⚠️",
-    skip_log: "⏭️",
+    warning: "🛑",
+    skip_log: "🚫",
     retry_log: "🔄",
 };
 
