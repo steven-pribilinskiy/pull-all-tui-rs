@@ -472,6 +472,35 @@ pub struct RepoState {
     pub page_loading: bool,
     /// True while a repo-page pull (`p`/`P`) is in flight, for the page spinner.
     pub pull_loading: bool,
+    /// Which list cells changed in the last refetch (drives the attention flash).
+    pub flash: CellFlash,
+    /// When the current flash expires; None when not flashing.
+    pub flash_until: Option<Instant>,
+}
+
+/// Per-column "value just changed in the last refetch" flags. Cells with a flag set pulse
+/// briefly (while `RepoState::flash_until` is in the future) to draw the eye to what changed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CellFlash {
+    pub status: bool,
+    pub ahead_behind: bool,
+    pub dirty: bool,
+    pub last_commit: bool,
+    pub branches: bool,
+    pub stashes: bool,
+    pub worktrees: bool,
+}
+
+impl CellFlash {
+    pub fn any(&self) -> bool {
+        self.status
+            || self.ahead_behind
+            || self.dirty
+            || self.last_commit
+            || self.branches
+            || self.stashes
+            || self.worktrees
+    }
 }
 
 impl RepoState {
@@ -493,6 +522,20 @@ impl RepoState {
             page: None,
             page_loading: false,
             pull_loading: false,
+            flash: CellFlash::default(),
+            flash_until: None,
+        }
+    }
+
+    /// Whether the refetch flash should be visible *this instant*. Pulses on/off every 250ms
+    /// while `flash_until` is in the future, so changed cells blink a few times then settle.
+    pub fn flash_on(&self) -> bool {
+        match self.flash_until {
+            Some(until) => {
+                let now = Instant::now();
+                now < until && ((until - now).as_millis() / 250) % 2 == 1
+            }
+            None => false,
         }
     }
 }

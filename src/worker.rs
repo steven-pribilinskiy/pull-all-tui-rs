@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -6,8 +7,8 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 use crate::app::{
-    AppState, ConfirmAction, ConfirmDialog, DiffMode, DiffSource, IconStyle, PageRow, PageRowKind,
-    RepoPageData, RepoStatus, SharedRepoState, WorktreeEntry,
+    AppState, CellFlash, ConfirmAction, ConfirmDialog, DiffMode, DiffSource, IconStyle, PageRow,
+    PageRowKind, RepoDetails, RepoPageData, RepoStatus, SharedRepoState, WorktreeEntry,
 };
 use crate::git::{
     base_file_list, base_merge_base, checkout_branch, classify_pull_output, delete_branch,
@@ -630,26 +631,89 @@ pub async fn run_refetch_batch(
     icon_style: IconStyle,
     cwd: std::path::PathBuf,
 ) {
+    // Snapshot the pre-refetch status of each repo so we can flash a status change.
+    let old_status: Vec<RepoStatus> =
+        repos.iter().map(|repo| repo.lock().unwrap().status.clone()).collect();
+    // Snapshot per-repo worktree counts (worktrees live on AppState, refreshed separately below).
+    let old_worktrees: Vec<(String, usize)> = {
+        let app = app_state.lock().unwrap();
+        repos
+            .iter()
+            .map(|repo| {
+                let name = repo.lock().unwrap().name.clone();
+                let count = app.worktrees.iter().filter(|wt| wt.repo == name).count();
+                (name, count)
+            })
+            .collect()
+    };
+
     let _ = run_all_pulls(repos.clone(), max_jobs, timeout_secs, icon_style).await;
 
     // Refresh per-repo details (the column/info source), bounded by the same concurrency cap.
+    // Old values stay on screen the whole time; we diff old vs new and flash only what changed.
     let semaphore = Arc::new(Semaphore::new(max_jobs.max(1)));
     let mut handles = Vec::new();
-    for repo in repos {
+    for (repo, prev_status) in repos.iter().cloned().zip(old_status) {
         let semaphore = Arc::clone(&semaphore);
         handles.push(tokio::spawn(async move {
             let _permit = semaphore.acquire_owned().await.ok();
-            let path = { repo.lock().unwrap().path.clone() };
-            let details = get_repo_details(&path).await;
-            repo.lock().unwrap().details = Some(details);
+            let (path, old_details) = {
+                let state = repo.lock().unwrap();
+                (state.path.clone(), state.details.clone())
+            };
+            let new_details = get_repo_details(&path).await;
+            let mut state = repo.lock().unwrap();
+            let mut flash = compute_flash(old_details.as_ref(), &new_details, &prev_status, &state.status);
+            // Reset stale worktree flag from a prior refetch; set fresh below.
+            flash.worktrees = false;
+            state.flash = flash;
+            state.flash_until = flash.any().then(|| Instant::now() + FLASH_DURATION);
+            state.details = Some(new_details);
         }));
     }
     for handle in handles {
         let _ = handle.await;
     }
 
-    // Re-discover worktrees so the worktree column/list refreshes too.
-    run_worktree_discovery(app_state, cwd).await;
+    // Re-discover worktrees so the worktree column/list refreshes too, then flash repos whose
+    // worktree count changed.
+    run_worktree_discovery(Arc::clone(&app_state), cwd).await;
+    let app = app_state.lock().unwrap();
+    for (repo, (name, old_count)) in repos.iter().zip(old_worktrees) {
+        let new_count = app.worktrees.iter().filter(|wt| wt.repo == name).count();
+        if new_count != old_count {
+            let mut state = repo.lock().unwrap();
+            state.flash.worktrees = true;
+            state.flash_until = Some(Instant::now() + FLASH_DURATION);
+        }
+    }
+}
+
+/// How long the post-refetch attention flash lasts.
+const FLASH_DURATION: Duration = Duration::from_millis(1500);
+
+/// Compare a repo's old and new details (and status) and return which list cells changed.
+/// Last-commit compares the hash (not the relative date, which drifts every minute).
+fn compute_flash(
+    old: Option<&RepoDetails>,
+    new: &RepoDetails,
+    old_status: &RepoStatus,
+    new_status: &RepoStatus,
+) -> CellFlash {
+    let status = std::mem::discriminant(old_status) != std::mem::discriminant(new_status);
+    let Some(old) = old else {
+        // No baseline (first detail load) — flash nothing but a genuine status change.
+        return CellFlash { status, ..CellFlash::default() };
+    };
+    CellFlash {
+        status,
+        ahead_behind: old.ahead != new.ahead || old.behind != new.behind,
+        dirty: old.dirty_count != new.dirty_count,
+        last_commit: old.commit_hash != new.commit_hash,
+        branches: old.branch_count != new.branch_count,
+        stashes: old.stash_count != new.stash_count,
+        worktrees: false,
+    }
 }
 
 /// Fetch info-panel details for all repos that don't have them yet (background column fill).

@@ -636,8 +636,8 @@ async fn run_event_loop(
                         state.status = RepoStatus::Queued;
                         state.log.clear();
                         state.auto_scroll = true;
-                        // Drop cached details so columns show `…` until the refresh lands.
-                        state.details = None;
+                        // Keep the cached details visible during the refresh; run_refetch_batch
+                        // diffs old vs new and flashes only the cells that actually changed.
                     }
                     repo
                 })

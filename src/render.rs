@@ -260,7 +260,20 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
         .map(|&repo_idx| {
             let state = app.repos[repo_idx].lock().unwrap();
             let icons = app.icons();
-            let glyph = status_glyph_colored(&state.status, tick, icons);
+            // Post-refetch attention flash: pulse REVERSED on the cells whose value changed.
+            let flash_on = state.flash_on();
+            let flash = state.flash;
+            let flash_style = |base: Style, flagged: bool| {
+                if flash_on && flagged {
+                    base.add_modifier(Modifier::REVERSED)
+                } else {
+                    base
+                }
+            };
+            let mut glyph = status_glyph_colored(&state.status, tick, icons);
+            if flash_on && flash.status {
+                glyph.style = glyph.style.add_modifier(Modifier::REVERSED);
+            }
             // Pad the glyph to `icon_width` display cells so the name column lines up
             // regardless of whether the glyph is a 1-cell Unicode char or a 2-cell emoji.
             let glyph_pad = icon_width.saturating_sub(glyph.width()).max(1);
@@ -297,7 +310,13 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
                 spans.push(Span::raw(" "));
                 match &state.details {
                     Some(details) => {
-                        spans.extend(ahead_behind_spans(details.ahead, details.behind, 9, icons));
+                        let mut ab = ahead_behind_spans(details.ahead, details.behind, 9, icons);
+                        if flash_on && flash.ahead_behind {
+                            for span in &mut ab {
+                                span.style = span.style.add_modifier(Modifier::REVERSED);
+                            }
+                        }
+                        spans.extend(ab);
                     }
                     None => spans.push(Span::styled(
                         format!("{:<9}", "…"),
@@ -315,7 +334,7 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
                 };
                 spans.push(Span::styled(
                     format!(" {}", pad_display(&text, dirty_w)),
-                    Style::default().fg(Color::Red),
+                    flash_style(Style::default().fg(Color::Red), flash.dirty),
                 ));
             }
             if columns.last_commit {
@@ -323,14 +342,17 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
                     Some(details) => truncate_str(&details.commit_rel_date, 11),
                     None => "…".to_string(),
                 };
-                spans.push(Span::styled(format!(" {text:<11}"), Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    format!(" {text:<11}"),
+                    flash_style(Style::default().fg(Color::DarkGray), flash.last_commit),
+                ));
             }
             if columns.worktrees {
                 let count = app.worktrees.iter().filter(|entry| entry.repo == state.name).count();
                 let text = if count > 0 { format!("{}{count}", icons.worktrees) } else { String::new() };
                 spans.push(Span::styled(
                     format!(" {}", pad_display(&text, count_w)),
-                    Style::default().fg(Color::Cyan),
+                    flash_style(Style::default().fg(Color::Cyan), flash.worktrees),
                 ));
             }
             if columns.branches {
@@ -343,7 +365,7 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
                 };
                 spans.push(Span::styled(
                     format!(" {}", pad_display(&text, count_w)),
-                    Style::default().fg(Color::Green),
+                    flash_style(Style::default().fg(Color::Green), flash.branches),
                 ));
             }
             if columns.stashes {
@@ -356,7 +378,7 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
                 };
                 spans.push(Span::styled(
                     format!(" {}", pad_display(&text, count_w)),
-                    Style::default().fg(Color::Magenta),
+                    flash_style(Style::default().fg(Color::Magenta), flash.stashes),
                 ));
             }
 
