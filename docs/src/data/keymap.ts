@@ -1,5 +1,5 @@
-// Single source of truth for the keymap, mirroring src/main.rs + src/render.rs (v0.17.1).
-// Keep this in sync with the event loop when bindings change.
+// Single source of truth for the keybinding table (the in-page explorer renders from this).
+// Keep it in sync with src/main.rs when bindings change.
 
 export type Binding = {
   /** Keys that trigger the action, rendered as <kbd>. Alternatives in one entry. */

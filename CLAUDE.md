@@ -69,18 +69,9 @@ The loop polls events with a 50ms timeout and calls `terminal.draw` every iterat
 - **This is a public personal repo: keep it free of any employer/organization-internal names** (internal service names, hosts, property IDs, private URLs, org details) in source, tests, comments, commit messages, or PR bodies — the tool scans whatever real repos you point it at, but none of that belongs in tracked content. Grep the diff before committing.
 - **Verifying TUI changes:** run it under tmux and drive it with SGR mouse sequences (`\e[<0;col;row M`/`m` click, `\e[<64/65..M` wheel); `tmux capture-pane -e -p` shows color escapes for asserting active-pane borders, flashes, etc. "typecheck + clippy pass" is not "done" for visual changes.
 
-## Docs ↔ code sync (mandatory)
+## Docs are part of every change
 
-The docs site (`docs/`, Astro Starlight → GitHub Pages, auto-deploys on any push touching `docs/`) and `README.md` are **part of every user-facing change, in the same commit** — not a follow-up. When you add/change/remove a keybinding, flag, status, glyph, modal, pane behavior, or any visible feature, update:
+The docs site (`docs/`, Astro Starlight → GitHub Pages, auto-deploys on any push touching `docs/`) and `README.md` are **updated in the same commit as any user-facing change** — adding/changing/removing a keybinding, flag, status, glyph, modal, or pane behavior — not as a follow-up.
 
-1. `docs/src/data/keymap.ts` — the **single source of truth for the keybinding table** (the in-page explorer renders from it). It carries a `(vX.Y.Z)` stamp.
-2. The relevant `docs/src/content/docs/**` page(s) and the `README.md` keybinding table / feature list.
-3. The `(vX.Y.Z)` stamp in `keymap.ts` — bump it to match the new `Cargo.toml` version. **This bump is your sign-off that the keybinding docs reflect this release.**
-
-This is enforced by three layers, so drift is caught, not just discouraged:
-
-- **Prevention (a test gate):** `tests/docs_in_sync.rs` asserts the `keymap.ts` stamp equals `CARGO_PKG_VERSION`. Because every change bumps `Cargo.toml` and `make test` runs before push, shipping code without re-stamping the keymap **fails the build** — forcing a deliberate "do the docs need updating?" checkpoint each release.
-- **Detection (visible staleness):** Starlight `lastUpdated` (in `docs/astro.config.mjs`) shows each page's git last-modified date in its footer; the deploy workflow uses `fetch-depth: 0` so the dates are real. A page that hasn't moved while the code churned is visibly stale.
-- **Intent (this rule):** docs live beside the code that they describe; treat a docs edit as required, not optional.
-
-(A deeper single-source would generate `keymap.ts` from `main.rs`, but key handling is imperative `match` arms, not declarative — the version-stamp gate is the pragmatic 80/20.)
+- `docs/src/data/keymap.ts` is the **single source of truth for the keybinding table** (the in-page explorer renders from it). Keep it in sync with `main.rs`, and mirror changes in the relevant `docs/src/content/docs/**` page(s) and the `README.md` table / feature list.
+- The site shows each page's git **`lastUpdated`** date (enabled in `docs/astro.config.mjs`; the deploy uses `fetch-depth: 0` so dates are real) — so a page that hasn't moved while the code churned is visibly stale.
