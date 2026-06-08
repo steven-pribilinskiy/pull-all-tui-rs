@@ -16,12 +16,17 @@ use crate::app::{
 
 const SPINNER_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
 
+/// The spinner frame for the current render tick (advances every 2 ticks). Shared by the
+/// list status glyph and the repo-page loading indicator so they animate identically.
+fn spinner_frame(tick: u64) -> &'static str {
+    SPINNER_FRAMES[(tick as usize / 2) % SPINNER_FRAMES.len()]
+}
+
 fn status_glyph_colored(status: &RepoStatus, tick: u64) -> Span<'static> {
     match status {
         RepoStatus::Queued => Span::styled("◯", Style::default().fg(Color::DarkGray)),
         RepoStatus::Running { .. } => {
-            let frame = SPINNER_FRAMES[(tick as usize / 2) % SPINNER_FRAMES.len()];
-            Span::styled(frame.to_string(), Style::default().fg(Color::Yellow))
+            Span::styled(spinner_frame(tick).to_string(), Style::default().fg(Color::Yellow))
         }
         RepoStatus::UpToDate => Span::styled("◌", Style::default().fg(Color::Gray)),
         RepoStatus::Updated => Span::styled("✓", Style::default().fg(Color::Green)),
@@ -55,7 +60,7 @@ pub fn render(frame: &mut Frame, app: &mut AppState, tick: u64) {
 
     // The dedicated repo page is full-screen and replaces the normal layout.
     if app.repo_page.is_some() {
-        render_repo_page(frame, app, area);
+        render_repo_page(frame, app, area, tick);
         if app.confirm.is_some() {
             render_confirm(frame, app, area);
         }
@@ -208,6 +213,7 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
         + usize::from(columns.dirty) * 4
         + usize::from(columns.last_commit) * 12
         + usize::from(columns.worktrees) * 5
+        + usize::from(columns.branches) * 5
         + usize::from(columns.stashes) * 5;
 
     let inner_width = inner.width as usize;
@@ -280,6 +286,14 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
                 let text = if count > 0 { format!("⑂{count}") } else { String::new() };
                 spans.push(Span::styled(format!(" {text:<4}"), Style::default().fg(Color::Cyan)));
             }
+            if columns.branches {
+                let text = match &state.details {
+                    Some(details) if details.branch_count > 0 => format!("⑂{}", details.branch_count),
+                    Some(_) => String::new(),
+                    None => "…".to_string(),
+                };
+                spans.push(Span::styled(format!(" {text:<4}"), Style::default().fg(Color::Green)));
+            }
             if columns.stashes {
                 let text = match &state.details {
                     Some(details) if details.stash_count > 0 => format!("≡{}", details.stash_count),
@@ -310,27 +324,36 @@ fn render_list(frame: &mut Frame, app: &AppState, area: Rect, tick: u64) -> usiz
         Span::styled("—", Style::default().fg(Color::DarkGray))
     };
 
-    let result_style = if app.selected == visible.len() + 1 {
-        Style::default()
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-
     items.push(ListItem::new(Line::from(vec![
         result_glyph,
         Span::raw(" "),
-        Span::styled("Result", result_style),
+        Span::raw("Result"),
     ])));
 
+    // A dynamic Errors row, only when something failed — appears after Result.
+    let has_errors = app.has_errors();
+    if has_errors {
+        let failed = app.counts().5;
+        items.push(ListItem::new(Line::from(vec![Span::styled(
+            "─".repeat(inner_width.saturating_sub(2)),
+            Style::default().fg(Color::DarkGray),
+        )])));
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("✗", Style::default().fg(Color::Red)),
+            Span::raw(" "),
+            Span::styled(format!("Errors ({failed})"), Style::default().fg(Color::Red)),
+        ])));
+    }
+
     let mut list_state = ListState::default();
-    // Map selected index to list index (skipping the separator line)
+    // Map the logical selection to a list index, skipping separator lines:
+    //   repo rows → same index; Result → visible.len()+1; Errors → visible.len()+3.
     if app.selected < visible.len() {
         list_state.select(Some(app.selected));
-    } else {
-        // +1 for separator
+    } else if app.selected == visible.len() {
         list_state.select(Some(visible.len() + 1));
+    } else {
+        list_state.select(Some(visible.len() + 3));
     }
 
     let total_items = items.len();
@@ -363,17 +386,14 @@ fn status_label(status: &RepoStatus) -> &'static str {
 fn render_preview(frame: &mut Frame, app: &AppState, area: Rect, _tick: u64) {
     let visible = app.visible_indices();
 
-    // When the Result overlay is active, show the summary regardless of selection.
-    let show_result = app.result_overlay || app.selected >= visible.len();
+    // Which pane is showing: a repo's log/diff, the Result summary, or the Errors list.
+    // The Result overlay (Space) forces Result regardless of selection.
+    let show_errors = !app.result_overlay && app.has_errors() && app.selected == visible.len() + 1;
+    let show_result = app.result_overlay || (app.selected >= visible.len() && !show_errors);
+    let on_repo = !show_result && !show_errors;
 
-    // Info view has its own layout (not the scrolling log/diff path).
-    if !show_result && app.right_view == RightView::Info {
-        render_info(frame, app, area, visible[app.selected]);
-        return;
-    }
-
-    // Pinned info (`I`): a compact info block above the log/diff, tracking the selection.
-    let area = if app.info_pinned && !show_result {
+    // Info block (`i`): a compact info section above the log/diff, tracking the selection.
+    let area = if app.info_pinned && on_repo {
         let repo_idx = visible[app.selected];
         let name = app.repos[repo_idx].lock().unwrap().name.clone();
         let lines = build_info_lines(app, repo_idx);
@@ -388,7 +408,9 @@ fn render_preview(frame: &mut Frame, app: &AppState, area: Rect, _tick: u64) {
         area
     };
 
-    let (header_text, content_lines, scroll_offset) = if show_result {
+    let (header_text, content_lines, scroll_offset) = if show_errors {
+        (" Errors ".to_string(), build_error_summary(app), 0usize)
+    } else if show_result {
         (" Result ".to_string(), build_result_summary(app), 0usize)
     } else {
         let repo_idx = visible[app.selected];
@@ -515,8 +537,8 @@ fn build_info_lines(app: &AppState, repo_idx: usize) -> Vec<Line<'static>> {
         lines.push(field(
             "Changes",
             format!(
-                "{} uncommitted · {} stashed",
-                details.dirty_count, details.stash_count
+                "{} uncommitted · {} stashed · {} feature branches",
+                details.dirty_count, details.stash_count, details.branch_count
             ),
         ));
     } else {
@@ -568,18 +590,6 @@ fn render_info_block(frame: &mut Frame, app: &AppState, area: Rect, title: Strin
     let para = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
     frame.render_widget(para, inner);
     render_scrollbar(frame, area, 0, total, inner.height as usize);
-}
-
-/// Full-pane info view (`i`): all fields plus a command-hint footer.
-fn render_info(frame: &mut Frame, app: &AppState, area: Rect, repo_idx: usize) {
-    let name = app.repos[repo_idx].lock().unwrap().name.clone();
-    let mut lines = build_info_lines(app, repo_idx);
-    lines.push(Line::from(String::new()));
-    lines.push(Line::from(Span::styled(
-        "o open in browser · y/Y copy · d diff · c claude · x clear",
-        Style::default().fg(Color::DarkGray),
-    )));
-    render_info_block(frame, app, area, format!(" {name} · info "), lines);
 }
 
 /// Convert a string that may contain ANSI escape codes to a ratatui Line.
@@ -753,6 +763,35 @@ fn build_result_summary(app: &AppState) -> Vec<String> {
     lines
 }
 
+/// Right-pane content for the dynamic Errors row: each failed repo with the tail of its log
+/// (the git stderr from the final failed attempt).
+fn build_error_summary(app: &AppState) -> Vec<String> {
+    const TAIL: usize = 15;
+    let mut lines = Vec::new();
+    let failed_count = app.counts().5;
+    lines.push(format!("{failed_count} repo(s) failed to pull:"));
+
+    for repo in &app.repos {
+        let state = repo.lock().unwrap();
+        if !matches!(state.status, RepoStatus::Failed) {
+            continue;
+        }
+        let branch = state.branch.clone().unwrap_or_else(|| "?".to_string());
+        lines.push(String::new());
+        lines.push(format!("✗ {} ({branch})", state.name));
+        let log: Vec<&String> = state.log.lines().iter().collect();
+        let start = log.len().saturating_sub(TAIL);
+        if start > 0 {
+            lines.push(format!("   …{start} earlier line(s)"));
+        }
+        for line in &log[start..] {
+            lines.push(format!("   {line}"));
+        }
+    }
+
+    lines
+}
+
 
 /// Build one status-bar row from (text, style, optional command) segments, recording a
 /// `ClickRegion` for each actionable segment at its screen columns.
@@ -822,6 +861,8 @@ fn render_status_bar(frame: &mut Frame, app: &mut AppState, area: Rect) {
                 (" · ".to_string(), hint, None),
                 (format!("{} w worktrees", mark(columns.worktrees)), active, Some(Command::ToggleColumn(Column::Worktrees))),
                 (" · ".to_string(), hint, None),
+                (format!("{} b branches", mark(columns.branches)), active, Some(Command::ToggleColumn(Column::Branches))),
+                (" · ".to_string(), hint, None),
                 (format!("{} s stashes", mark(columns.stashes)), active, Some(Command::ToggleColumn(Column::Stashes))),
                 (" · esc".to_string(), hint, None),
             ],
@@ -839,7 +880,7 @@ fn render_status_bar(frame: &mut Frame, app: &mut AppState, area: Rect) {
             vec![
                 (format!("{filter_tag}j/k ↑/↓ move · g/G top/end · space result · "), hint, None),
                 ("i".to_string(), active, Some(Command::Info)),
-                ("/I info/pin · ".to_string(), hint, None),
+                (" info · ".to_string(), hint, None),
                 ("t".to_string(), active, Some(Command::ToggleLeader)),
                 (" cols · ".to_string(), hint, None),
                 ("enter".to_string(), active, Some(Command::OpenPage)),
@@ -911,6 +952,8 @@ fn render_help(frame: &mut Frame, app: &mut AppState, area: Rect) {
     // Each item is a line plus an optional URL that makes the whole row clickable.
     let mut items: Vec<(Line<'static>, Option<String>)> = Vec::new();
     let header = |text: &str| (Line::from(Span::styled(text.to_string(), header_style)), None);
+    let subhead_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let subhead = |text: &str| (Line::from(Span::styled(text.to_string(), subhead_style)), None);
     let plain = |text: &str| (Line::from(text.to_string()), None);
     let link = |label: &str, url: &str| {
         let line = Line::from(vec![
@@ -949,19 +992,35 @@ fn render_help(frame: &mut Frame, app: &mut AppState, area: Rect) {
     items.push(plain("  --profile-out FILE             write the profile report to FILE"));
     items.push(plain(""));
 
-    items.push(header("HOTKEYS"));
-    items.push(plain("  Move     j/k  ↑/↓  ·  g/G top/end  ·  Home/End jump  ·  PgUp/PgDn page  ·  wheel scroll  ·  click a row"));
-    items.push(plain("  View     space result overlay  ·  tab list/preview focus  ·  PgUp/PgDn scroll preview (focused)  ·  End resume autoscroll"));
-    items.push(plain("  Retry    r selected · R all          (repos that failed or were skipped)"));
-    items.push(plain("  Refetch  f selected · F all          (re-pull anything; skips in-progress)"));
-    items.push(plain("  Repo     i info · I pin info · d diff · o open in browser · y/Y copy path/url · c claude · x clear log"));
-    items.push(plain("  Cols     t toggle mode (stays on) · a/d/l/w/s columns (ahead-behind/dirty/last-commit/worktrees/stashes) · Esc done"));
-    items.push(plain("  Page     enter open repo · p pull branch · P pull all branches · o open in browser · d delete branch / drop stash / remove worktree (confirm) · Home/End jump · esc back"));
-    items.push(plain("  Stash    STASHES section lists stashes · ● marks dirty branches/worktrees"));
-    items.push(plain("  Diff     enter/double-click a stash or dirty row → 90% diff modal · t toggle uncommitted⇄base · d drop/remove (confirm) · ↑↓/PgUp/PgDn/Home/End scroll · esc close"));
-    items.push(plain("  Layout   [ ] resize panes  ·  drag the divider to resize"));
-    items.push(plain("  Filter   / filter by name  ·  Esc clear filter"));
-    items.push(plain("  Other    ? this help  ·  q quit  ·  Ctrl-C exit"));
+    items.push(header("HOTKEYS — repo list"));
+    items.push(subhead("  Navigate"));
+    items.push(plain("    j/k ↑/↓ move · g/G top/end · Home/End jump · PgUp/PgDn page · wheel · click a row"));
+    items.push(subhead("  Views & panes"));
+    items.push(plain("    space Result/Errors overlay · tab list⇄preview focus · i info panel · d diff · End resume autoscroll"));
+    items.push(subhead("  Pull / retry"));
+    items.push(plain("    r/R retry selected/all (failed or skipped) · f/F refetch selected/all (re-pull anything; skips in-progress)"));
+    items.push(subhead("  Clipboard & open"));
+    items.push(plain("    y copy absolute path · Y copy remote (origin) url · o open remote in browser · x clear this repo's log buffer"));
+    items.push(subhead("  Columns"));
+    items.push(plain("    t then a/d/l/w/b/s → ahead-behind / dirty / last-commit / worktrees / branches / stashes · Esc done"));
+    items.push(subhead("  Other"));
+    items.push(plain("    c claude in repo dir · ? this help · q quit · Ctrl-C exit"));
+    items.push(plain(""));
+
+    items.push(header("HOTKEYS — repo page  (enter / double-click a repo)"));
+    items.push(plain("    ↑↓/j/k move · Home/End · enter/dbl-click open diff (stash or dirty row) · shift+enter checkout (clean branch)"));
+    items.push(plain("    p pull branch · P pull all branches · c claude · o open on remote · y copy path · esc back"));
+    items.push(subhead("  d — context action (with confirm):"));
+    items.push(plain("    branch → delete · stash → drop · worktree → remove · current branch (dirty) → discard changes"));
+    items.push(plain("    ● marks branches/worktrees with uncommitted changes · STASHES section lists stashes"));
+    items.push(plain(""));
+
+    items.push(header("HOTKEYS — diff modal"));
+    items.push(plain("    ↑↓/PgUp/PgDn/Home/End scroll · t toggle uncommitted⇄base branch · d discard / remove / drop (confirm) · esc close"));
+    items.push(plain(""));
+
+    items.push(header("HOTKEYS — layout & filter"));
+    items.push(plain("    [ ] resize panes · drag the divider · / filter by name · Esc clear filter"));
     items.push(plain(""));
 
     items.push(header("EXIT CODES"));
@@ -1030,7 +1089,7 @@ fn render_diff_modal(frame: &mut Frame, app: &mut AppState, area: Rect) {
                 };
                 (
                     format!(" {name} · {mode} "),
-                    " ↑↓ · PgUp/PgDn · Home/End · t toggle uncommitted⇄base · d drop/remove · esc close ".to_string(),
+                    " ↑↓ · PgUp/PgDn · Home/End · t toggle uncommitted⇄base · d discard/remove · esc close ".to_string(),
                 )
             }
         };
@@ -1094,14 +1153,14 @@ fn ahead_behind_spans(ahead: Option<u32>, behind: Option<u32>, width: usize) -> 
 }
 
 /// Render the full-screen dedicated repo page: branches + worktrees + fresh ahead/behind.
-fn render_repo_page(frame: &mut Frame, app: &mut AppState, area: Rect) {
+fn render_repo_page(frame: &mut Frame, app: &mut AppState, area: Rect, tick: u64) {
     let rows = app.repo_page_rows();
     let Some(idx) = app.repo_page else {
         return;
     };
     let selected = app.repo_page_selected.min(rows.len().saturating_sub(1));
 
-    let (name, path, loading, fetched, fetch_error) = {
+    let (name, path, loading, fetched, fetch_error, pulling) = {
         let state = app.repos[idx].lock().unwrap();
         let (fetched, fetch_error) = match &state.page {
             Some(page) => (page.fetched, page.fetch_error.clone()),
@@ -1113,6 +1172,7 @@ fn render_repo_page(frame: &mut Frame, app: &mut AppState, area: Rect) {
             state.page_loading,
             fetched,
             fetch_error,
+            state.pull_loading,
         )
     };
     let head_branch = rows
@@ -1121,16 +1181,19 @@ fn render_repo_page(frame: &mut Frame, app: &mut AppState, area: Rect) {
         .map(|row| row.branch.clone())
         .unwrap_or_else(|| "—".to_string());
 
+    // Animated spinner in the title while a pull runs or the page (re)fetches branches.
     let mut title = format!(" {name} · {head_branch} · {path} ");
-    if loading || !fetched {
-        title.push_str("· (fetching…) ");
+    if pulling {
+        title.push_str(&format!("· {} pulling… ", spinner_frame(tick)));
+    } else if loading || !fetched {
+        title.push_str(&format!("· {} fetching… ", spinner_frame(tick)));
     }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title(title)
         .title_bottom(
-            Line::from(" ↑↓ move · Home/End · enter checkout · enter/dbl-click diff (stash/dirty) · p pull · P pull all · c claude · o open · y copy · d delete/drop · esc back ")
+            Line::from(" ↑↓ move · Home/End · enter/dbl-click diff (stash/dirty) · shift+enter checkout · p pull · P pull all · c claude · o open · y copy · d delete/drop/discard · esc back ")
                 .right_aligned(),
         );
     let inner = block.inner(area);
@@ -1271,9 +1334,55 @@ fn render_confirm(frame: &mut Frame, app: &AppState, area: Rect) {
     let Some(confirm) = &app.confirm else {
         return;
     };
-    let width = (confirm.message.chars().count() as u16 + 8).clamp(30, area.width.saturating_sub(4).max(30));
-    // Destructive actions get a taller, red, warning-laden dialog; safe ones a calm yellow box.
-    let height = if confirm.danger { 7 } else { 6 };
+    // Cap how many files we enumerate so a huge dirty tree can't overflow the screen.
+    let max_per_list = 10usize;
+    let has_files = !confirm.restore_files.is_empty() || !confirm.delete_files.is_empty();
+
+    // Widen to fit the longest file line (with its two-space indent) when listing files.
+    let file_width = confirm
+        .restore_files
+        .iter()
+        .chain(confirm.delete_files.iter())
+        .map(|file| file.chars().count() + 4)
+        .max()
+        .unwrap_or(0) as u16;
+    let content_width = (confirm.message.chars().count() as u16 + 8).max(file_width);
+    let width = content_width.clamp(30, area.width.saturating_sub(4).max(30));
+
+    // Build the file-detail body first so we can size the dialog to it.
+    let mut detail_lines: Vec<Line> = Vec::new();
+    let mut push_file_section = |files: &[String], label: &str, color: Color| {
+        if files.is_empty() {
+            return;
+        }
+        detail_lines.push(Line::from(Span::styled(
+            format!("  {label} ({}):", files.len()),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )));
+        for file in files.iter().take(max_per_list) {
+            detail_lines.push(Line::from(Span::styled(
+                format!("    {file}"),
+                Style::default().fg(color),
+            )));
+        }
+        if files.len() > max_per_list {
+            detail_lines.push(Line::from(Span::styled(
+                format!("    … and {} more", files.len() - max_per_list),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    };
+    push_file_section(&confirm.restore_files, "Restore", Color::Yellow);
+    push_file_section(&confirm.delete_files, "Delete", Color::Red);
+
+    // Base height: borders + blank + message (+ danger warning) + blank + prompt. Add the
+    // file body plus a separating blank line when there are files to list.
+    let mut height = if confirm.danger { 7 } else { 6 };
+    if has_files {
+        height += detail_lines.len() as u16 + 1;
+    }
+    let height = height.min(area.height.saturating_sub(2).max(6));
+
     let modal = centered_rect(width, height, area);
     let (border_color, title) = if confirm.danger {
         (Color::Red, " ⚠ Confirm — destructive ")
@@ -1294,6 +1403,10 @@ fn render_confirm(frame: &mut Frame, app: &AppState, area: Rect) {
             Style::default().fg(Color::Gray),
         )),
     ];
+    if has_files {
+        lines.push(Line::from(String::new()));
+        lines.append(&mut detail_lines);
+    }
     if confirm.danger {
         lines.push(Line::from(Span::styled(
             "  ⚠ This cannot be undone.",

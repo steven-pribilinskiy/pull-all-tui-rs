@@ -6,14 +6,15 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 use crate::app::{
-    AppState, DiffMode, DiffSource, PageRow, PageRowKind, RepoPageData, RepoStatus,
-    SharedRepoState, WorktreeEntry,
+    AppState, ConfirmAction, ConfirmDialog, DiffMode, DiffSource, PageRow, PageRowKind,
+    RepoPageData, RepoStatus, SharedRepoState, WorktreeEntry,
 };
 use crate::git::{
     base_branch_diff, checkout_branch, classify_pull_output, delete_branch, diff_stat,
-    discover_worktrees, drop_stash, fetch_ff_branch, fetch_remote, get_branch, get_diff,
-    get_remote_url, get_repo_details, is_dirty, list_local_branches, list_stashes, list_worktrees,
-    pull_all_branches, pull_ff_only, remove_worktree, stash_diff, uncommitted_diff, PullOutcome,
+    discard_changes, discard_status, discover_worktrees, drop_stash, fetch_ff_branch, fetch_remote,
+    get_branch, get_diff, get_remote_url, get_repo_details, is_dirty, list_local_branches,
+    list_stashes, list_worktrees, pull_all_branches, pull_ff_only, remove_worktree, stash_diff,
+    stash_files, uncommitted_diff, PullOutcome,
 };
 
 /// Pull a single repository, updating `repo_state` as progress arrives.
@@ -52,67 +53,24 @@ pub async fn pull_repo(
         return Ok(());
     }
 
-    // Spawn git pull and track PID
-    let mut child = Command::new("timeout")
-        .args([
-            &timeout_secs.to_string(),
-            "git",
-            "-C",
-            path.to_str().unwrap_or("."),
-            "pull",
-            "--ff-only",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-
-    let pid = child.id().unwrap_or(0);
-    {
-        let mut state = repo_state.lock().unwrap();
-        state.status = RepoStatus::Running { pid };
+    // Run the pull, retrying once on failure (transient network/lock issues are common).
+    // Status stays Running across both attempts; the log keeps the first failure's output.
+    const MAX_ATTEMPTS: u32 = 2;
+    let mut outcome = PullOutcome::Failed;
+    for attempt in 0..MAX_ATTEMPTS {
+        outcome = run_pull_attempt(&repo_state, &path, timeout_secs).await?;
+        if !matches!(outcome, PullOutcome::Failed) {
+            break;
+        }
+        if attempt + 1 < MAX_ATTEMPTS {
+            repo_state
+                .lock()
+                .unwrap()
+                .log
+                .push("↻ pull failed — retrying…".to_string());
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        }
     }
-
-    // Stream stdout
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-
-    let repo_state_stdout = Arc::clone(&repo_state);
-    let stdout_task = tokio::spawn(async move {
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
-        let mut collected = String::new();
-        while let Ok(Some(line)) = lines.next_line().await {
-            collected.push_str(&line);
-            collected.push('\n');
-            let mut state = repo_state_stdout.lock().unwrap();
-            state.log.push(line);
-        }
-        collected
-    });
-
-    let repo_state_stderr = Arc::clone(&repo_state);
-    let stderr_task = tokio::spawn(async move {
-        let reader = BufReader::new(stderr);
-        let mut lines = reader.lines();
-        let mut collected = String::new();
-        while let Ok(Some(line)) = lines.next_line().await {
-            collected.push_str(&line);
-            collected.push('\n');
-            let mut state = repo_state_stderr.lock().unwrap();
-            state.log.push(line);
-        }
-        collected
-    });
-
-    let status = child.wait().await?;
-    let exit_success = status.success();
-
-    let stdout_output = stdout_task.await.unwrap_or_default();
-    let stderr_output = stderr_task.await.unwrap_or_default();
-    let combined = format!("{stdout_output}{stderr_output}");
-
-    let outcome = classify_pull_output(&combined, exit_success);
 
     let elapsed = started.elapsed();
     match outcome {
@@ -142,6 +100,69 @@ pub async fn pull_repo(
     }
 
     Ok(())
+}
+
+/// Run one `git pull --ff-only` attempt: spawn it (under `timeout`), set the repo Running,
+/// stream stdout/stderr into the log, and classify the result. Used by `pull_repo`'s retry loop.
+async fn run_pull_attempt(
+    repo_state: &SharedRepoState,
+    path: &std::path::Path,
+    timeout_secs: u64,
+) -> Result<PullOutcome> {
+    let mut child = Command::new("timeout")
+        .args([
+            &timeout_secs.to_string(),
+            "git",
+            "-C",
+            path.to_str().unwrap_or("."),
+            "pull",
+            "--ff-only",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    let pid = child.id().unwrap_or(0);
+    repo_state.lock().unwrap().status = RepoStatus::Running { pid };
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    let repo_state_stdout = Arc::clone(repo_state);
+    let stdout_task = tokio::spawn(async move {
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        let mut collected = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            collected.push_str(&line);
+            collected.push('\n');
+            repo_state_stdout.lock().unwrap().log.push(line);
+        }
+        collected
+    });
+
+    let repo_state_stderr = Arc::clone(repo_state);
+    let stderr_task = tokio::spawn(async move {
+        let reader = BufReader::new(stderr);
+        let mut lines = reader.lines();
+        let mut collected = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            collected.push_str(&line);
+            collected.push('\n');
+            repo_state_stderr.lock().unwrap().log.push(line);
+        }
+        collected
+    });
+
+    let status = child.wait().await?;
+    let exit_success = status.success();
+
+    let stdout_output = stdout_task.await.unwrap_or_default();
+    let stderr_output = stderr_task.await.unwrap_or_default();
+    let combined = format!("{stdout_output}{stderr_output}");
+
+    Ok(classify_pull_output(&combined, exit_success))
 }
 
 /// Discover worktrees and update app_state when done.
@@ -366,6 +387,79 @@ pub async fn run_remove_worktree(
     finish_repo_mutation(&app_state, repo_idx, &path, result.is_ok(), message).await;
 }
 
+/// Gather the working-tree changes a discard would touch and pop a danger confirm dialog
+/// listing the files to be restored and deleted. The actual discard runs on accept.
+pub async fn run_prepare_discard(
+    app_state: Arc<Mutex<AppState>>,
+    repo_idx: usize,
+    path: std::path::PathBuf,
+) {
+    match discard_status(&path).await {
+        Ok((restore, delete)) => {
+            if restore.is_empty() && delete.is_empty() {
+                app_state.lock().unwrap().repo_page_message =
+                    Some("nothing to discard".to_string());
+                return;
+            }
+            let message = format!(
+                "Discard all uncommitted changes? {} restored, {} deleted.",
+                restore.len(),
+                delete.len()
+            );
+            let mut app = app_state.lock().unwrap();
+            app.confirm = Some(ConfirmDialog {
+                message,
+                action: ConfirmAction::DiscardChanges { repo_idx, path },
+                danger: true,
+                restore_files: restore,
+                delete_files: delete,
+            });
+        }
+        Err(err) => {
+            app_state.lock().unwrap().repo_page_message =
+                Some(format!("discard failed: {err}"));
+        }
+    }
+}
+
+/// Gather the files a stash holds and pop a danger confirm dialog listing them (under "Delete",
+/// since dropping the stash discards them). The actual drop runs on accept.
+pub async fn run_prepare_drop_stash(
+    app_state: Arc<Mutex<AppState>>,
+    repo_idx: usize,
+    index: usize,
+) {
+    let path = { app_state.lock().unwrap().repos[repo_idx].lock().unwrap().path.clone() };
+    let files = stash_files(&path, index).await.unwrap_or_default();
+    let message = format!(
+        "Drop stash@{{{index}}}? {} file(s) will be lost.",
+        files.len()
+    );
+    let mut app = app_state.lock().unwrap();
+    app.confirm = Some(ConfirmDialog {
+        message,
+        action: ConfirmAction::DropStash { repo_idx, index },
+        danger: true,
+        restore_files: Vec::new(),
+        delete_files: files,
+    });
+}
+
+/// Discard all uncommitted changes (revert tracked, delete untracked), set a banner, refresh
+/// details, and reload the page.
+pub async fn run_discard_changes(
+    app_state: Arc<Mutex<AppState>>,
+    repo_idx: usize,
+    path: std::path::PathBuf,
+) {
+    let result = discard_changes(&path).await;
+    let message = match &result {
+        Ok(()) => "Discarded uncommitted changes".to_string(),
+        Err(err) => format!("discard failed: {err}"),
+    };
+    finish_repo_mutation(&app_state, repo_idx, &path, result.is_ok(), message).await;
+}
+
 /// Set the repo-page banner; on success refresh cached details (for the main-list columns) and
 /// drop the cached page so it reloads.
 async fn finish_repo_mutation(
@@ -394,7 +488,8 @@ async fn finish_repo_mutation(
 pub async fn run_pull_branch(app_state: Arc<Mutex<AppState>>, repo_idx: usize, row: PageRow) {
     let (path, worktrees) = {
         let app = app_state.lock().unwrap();
-        let repo = app.repos[repo_idx].lock().unwrap();
+        let mut repo = app.repos[repo_idx].lock().unwrap();
+        repo.pull_loading = true;
         let worktrees = repo
             .page
             .as_ref()
@@ -425,7 +520,9 @@ pub async fn run_pull_branch(app_state: Arc<Mutex<AppState>>, repo_idx: usize, r
         Ok(_) => format!("{} already up to date", row.branch),
         Err(err) => format!("pull failed: {err}"),
     });
-    app.repos[repo_idx].lock().unwrap().page = None;
+    let mut repo = app.repos[repo_idx].lock().unwrap();
+    repo.pull_loading = false;
+    repo.page = None;
 }
 
 /// Fast-forward every fast-forwardable local branch of the repo, set a summary banner,
@@ -433,11 +530,13 @@ pub async fn run_pull_branch(app_state: Arc<Mutex<AppState>>, repo_idx: usize, r
 pub async fn run_pull_all_branches(app_state: Arc<Mutex<AppState>>, repo_idx: usize) {
     let Some((path, branches, worktrees)) = ({
         let app = app_state.lock().unwrap();
-        let repo = app.repos[repo_idx].lock().unwrap();
+        let mut repo = app.repos[repo_idx].lock().unwrap();
+        repo.pull_loading = true;
         repo.page.as_ref().map(|page| {
             (repo.path.clone(), page.branches.clone(), page.worktrees.clone())
         })
     }) else {
+        app_state.lock().unwrap().repos[repo_idx].lock().unwrap().pull_loading = false;
         return;
     };
 
@@ -453,7 +552,9 @@ pub async fn run_pull_all_branches(app_state: Arc<Mutex<AppState>>, repo_idx: us
         "Pulled: {} updated, {} up-to-date, {} skipped{failed}",
         summary.updated, summary.up_to_date, summary.skipped
     ));
-    app.repos[repo_idx].lock().unwrap().page = None;
+    let mut repo = app.repos[repo_idx].lock().unwrap();
+    repo.pull_loading = false;
+    repo.page = None;
 }
 
 /// Fetch info-panel details for all repos that don't have them yet (background column fill).

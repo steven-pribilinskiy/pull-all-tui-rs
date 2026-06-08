@@ -40,12 +40,12 @@ impl RepoStatus {
     }
 }
 
-/// What the right pane shows for the selected repo.
+/// What the right pane shows for the selected repo. The info block is an additive overlay
+/// (`info_pinned`) drawn above whichever of these is active, not a separate variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RightView {
     #[default]
     Log,
-    Info,
     Diff,
 }
 
@@ -57,6 +57,8 @@ pub struct RepoDetails {
     pub behind: Option<u32>,
     pub dirty_count: u32,
     pub stash_count: u32,
+    /// Local branches excluding `main`/`dev`.
+    pub branch_count: u32,
     pub commit_hash: String,
     pub commit_subject: String,
     pub commit_author: String,
@@ -174,6 +176,7 @@ pub enum Column {
     Dirty,
     LastCommit,
     Worktrees,
+    Branches,
     Stashes,
 }
 
@@ -186,13 +189,14 @@ pub struct ColumnFlags {
     pub dirty: bool,
     pub last_commit: bool,
     pub worktrees: bool,
+    pub branches: bool,
     pub stashes: bool,
 }
 
 impl ColumnFlags {
     /// Any column that needs a per-repo `git` call (drives the background details pass).
     pub fn any_git(&self) -> bool {
-        self.ahead_behind || self.dirty || self.last_commit || self.stashes
+        self.ahead_behind || self.dirty || self.last_commit || self.branches || self.stashes
     }
 }
 
@@ -232,6 +236,7 @@ pub enum ConfirmAction {
     DeleteBranch { repo_idx: usize, branch: String, force: bool },
     DropStash { repo_idx: usize, index: usize },
     RemoveWorktree { repo_idx: usize, path: PathBuf, force: bool },
+    DiscardChanges { repo_idx: usize, path: PathBuf },
 }
 
 /// A yes/no confirmation modal.
@@ -241,6 +246,23 @@ pub struct ConfirmDialog {
     pub action: ConfirmAction,
     /// Destructive (loses uncommitted/unmerged work) — rendered with a scarier dialog.
     pub danger: bool,
+    /// Tracked files a discard would revert (shown in the dialog body).
+    pub restore_files: Vec<String>,
+    /// Untracked files a discard would delete (shown in the dialog body).
+    pub delete_files: Vec<String>,
+}
+
+impl ConfirmDialog {
+    /// A dialog with no per-file detail body.
+    pub fn simple(message: String, action: ConfirmAction, danger: bool) -> Self {
+        Self {
+            message,
+            action,
+            danger,
+            restore_files: Vec::new(),
+            delete_files: Vec::new(),
+        }
+    }
 }
 
 /// Ring buffer capped at `RING_BUFFER_CAPACITY` lines.
@@ -294,6 +316,8 @@ pub struct RepoState {
     pub page: Option<RepoPageData>,
     /// Guard so the repo-page fetch is spawned at most once per open.
     pub page_loading: bool,
+    /// True while a repo-page pull (`p`/`P`) is in flight, for the page spinner.
+    pub pull_loading: bool,
 }
 
 impl RepoState {
@@ -314,6 +338,7 @@ impl RepoState {
             diff: None,
             page: None,
             page_loading: false,
+            pull_loading: false,
         }
     }
 }
@@ -414,11 +439,6 @@ impl AppState {
         } else {
             Self::DEFAULT_SPLIT
         };
-        let right_view = if persisted.info_active {
-            RightView::Info
-        } else {
-            RightView::Log
-        };
         AppState {
             repos,
             worktrees: Vec::new(),
@@ -439,7 +459,7 @@ impl AppState {
             preview_area: Rect::default(),
             divider_col: 0,
             list_offset: 0,
-            right_view,
+            right_view: RightView::Log,
             info_pinned: persisted.info_pinned,
             show_help: false,
             help_scroll: 0,
@@ -463,7 +483,6 @@ impl AppState {
     pub fn save_state(&self) {
         crate::persist::save(&crate::persist::PersistedState {
             columns: self.columns,
-            info_active: self.right_view == RightView::Info,
             info_pinned: self.info_pinned,
             split_ratio: self.split_ratio,
         });
@@ -511,10 +530,13 @@ impl AppState {
         }
         let row_idx = (row - inner_y) as usize + self.list_offset;
         let visible_len = self.visible_indices().len();
+        // Physical rows: [repos…][sep][Result]([sep][Errors]). Map back to logical selection.
         if row_idx < visible_len {
             Some(row_idx)
         } else if row_idx == visible_len + 1 {
             Some(visible_len)
+        } else if self.has_errors() && row_idx == visible_len + 3 {
+            Some(visible_len + 1)
         } else {
             None
         }
@@ -539,9 +561,9 @@ impl AppState {
         }
     }
 
-    /// Total items in the list (visible repos + 1 Result item).
+    /// Total items in the list (visible repos + Result item + optional Errors item).
     pub fn list_len(&self) -> usize {
-        self.visible_indices().len() + 1
+        self.visible_indices().len() + 1 + usize::from(self.has_errors())
     }
 
     /// Count of repos in each state.
@@ -569,6 +591,11 @@ impl AppState {
     pub fn done_count(&self) -> usize {
         let (_, _, updated, up_to_date, skipped, failed) = self.counts();
         updated + up_to_date + skipped + failed
+    }
+
+    /// Any repo ended in `Failed` — gates the dynamic "Errors" list row.
+    pub fn has_errors(&self) -> bool {
+        self.counts().5 > 0
     }
 
     /// Repos with an issue (failed or skipped) — the targets of "retry".
@@ -835,6 +862,7 @@ impl AppState {
             Column::Dirty => self.columns.dirty = !self.columns.dirty,
             Column::LastCommit => self.columns.last_commit = !self.columns.last_commit,
             Column::Worktrees => self.columns.worktrees = !self.columns.worktrees,
+            Column::Branches => self.columns.branches = !self.columns.branches,
             Column::Stashes => self.columns.stashes = !self.columns.stashes,
         }
     }

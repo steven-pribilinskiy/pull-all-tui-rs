@@ -2,11 +2,15 @@
 
 Interactive multi-repo git pull dashboard. Pulls every git repo in a directory in parallel with live per-repo logs, retry/refetch support, and a two-pane TUI layout. This is the canonical Rust implementation; it also fronts the Go, Bun, and bash alternatives via subcommands.
 
+📖 **Documentation: https://steven-pribilinskiy.github.io/pull-all**
+
 ## Features
 
 - Parallel pulls with configurable concurrency (default: nproc)
 - Live log streaming per repo in a scrollable preview pane
 - Status glyphs: queued / running / up-to-date / updated / skipped / failed
+- Automatic one-shot retry of a failed pull before marking it failed
+- Dynamic `Errors (N)` page (after `Result`) listing each failed repo with its error output
 - Retry repos with an issue (`r` / `R`) and refetch any repo from scratch (`f` / `F`)
 - Action hints dim when they'd be a no-op
 - Worktree discovery (`.worktrees/*/.git`)
@@ -71,18 +75,19 @@ The `cli` backend (`pull-all-repos`, the original parallel-pull bash script that
 | `Tab` | Toggle focus: list ↔ preview |
 | `PgUp` / `PgDn` | Scroll preview (when focused) |
 | `End` | Resume auto-scroll in preview |
-| `Enter` / double-click | Open the dedicated repo page for the selected repo |
+| `Enter` / double-click | Open the dedicated repo page for the selected repo (on the repo list) |
 | `r` | Retry selected repo if it has an issue (failed or skipped) |
 | `R` | Retry all repos with an issue (failed or skipped) |
 | `f` | Refetch selected repo (re-pull regardless of status, unless it's in progress) |
 | `F` | Refetch all repos that aren't currently in progress |
-| `i` | Toggle the per-repo info panel (status, branch, ahead/behind, remote, last commit, worktrees, changes, path) |
+| `i` | Toggle the info panel — an additive block above the log/diff (status, branch, ahead/behind, remote, last commit, worktrees, changes, path) |
 | `d` | Toggle the per-repo diff view (working-tree changes, or the last pull's diff) |
-| `t` | Column-toggle leader: press `t` then `a`/`d`/`l`/`w`/`s` to show/hide a column (mode stays active until `Esc`) |
+| `t` | Column-toggle leader: press `t` then `a`/`d`/`l`/`w`/`b`/`s` to show/hide a column (mode stays active until `Esc`) |
 | `o` | Open the selected repo's remote in the browser |
-| `y` / `Y` | Copy the selected repo's path / remote URL to the clipboard |
+| `y` | Copy the selected repo's **absolute path** to the clipboard |
+| `Y` | Copy the selected repo's **remote (origin) URL** to the clipboard |
 | `c` | Start claude code in the selected repo (suspends the TUI, returns on exit) |
-| `x` | Clear log buffer for selected repo |
+| `x` | Clear **this repo's log buffer** (empties the streamed pull output) |
 | `?` | Open the help modal (GitHub/notes links, all keys, flags & env) |
 | `/` | Filter repos by name |
 | `Esc` | Clear filter (or quit when no filter) |
@@ -95,17 +100,17 @@ The repo list, the log/diff preview, the help modal, and the repo page all show 
 
 ### Repo page (`Enter` / double-click)
 
-Opens a full-screen page for the selected repo that runs `git fetch` and lists every local branch (with HEAD marker, fresh ahead/behind vs upstream, upstream name, last-commit date, subject), every worktree (branch + path), and every stash (`STASHES` section). A red `●` marks branches/worktrees with uncommitted changes. Navigate rows with `j`/`k`/`g`/`G`/`Home`/`End` (or the wheel / click); `Enter` checks out the selected branch (clean tree only); `p` fast-forwards the selected branch, `P` all fast-forwardable branches; `D` deletes a branch (only when not current and nothing unpushed — `git branch -d`, with a confirmation dialog); `c` starts claude code in that branch/worktree's path; `o` opens the branch on the remote; `y` copies its path; `Esc`/`q` returns.
+Opens a full-screen page for the selected repo that runs `git fetch` and lists every local branch (with HEAD marker, fresh ahead/behind vs upstream, upstream name, last-commit date, subject), every worktree (branch + path), and every stash (`STASHES` section). A red `●` marks branches/worktrees with uncommitted changes. Navigate rows with `j`/`k`/`g`/`G`/`Home`/`End` (or the wheel / click); `Enter` (or double-click) opens the diff modal on a stash or dirty row; `Shift+Enter` checks out the selected branch (clean, non-current); `p` fast-forwards the selected branch, `P` all fast-forwardable branches; `d` deletes a branch / drops a stash / removes a worktree / discards the current branch's uncommitted changes (with a confirmation dialog whose severity scales with danger); `c` starts claude code in that branch/worktree's path; `o` opens the branch on the remote; `y` copies its path; `Esc`/`q` returns.
 
 `Enter` or a double-click on a **stash** or a **dirty** branch/worktree opens a 90%-of-screen **diff modal**: a stash shows `git stash show -p`; a dirty row shows its uncommitted changes, and `t` toggles between *uncommitted* (vs HEAD) and *vs base branch* (everything changed since forking from `origin/HEAD`). Scroll with `↑↓`/`PgUp`/`PgDn`/`Home`/`End` or the wheel; `Esc` closes.
 
 ### Columns (`t` leader)
 
-The list always shows the status glyph + name + branch. Press `t` then a column key to toggle extra columns: `a` ahead/behind, `d` dirty marker, `l` last-commit age, `w` worktree count, `s` stash count (`≡N`). The git-derived columns (`a`/`d`/`l`/`s`) fetch per-repo details in the background the first time one is enabled (cells show `…` until ready); `w` is free from worktree discovery. Enabled columns persist across runs.
+The list always shows the status glyph + name + branch. Press `t` then a column key to toggle extra columns: `a` ahead/behind, `d` dirty marker (`•N`), `l` last-commit age, `w` worktree count (`⑂N`, cyan), `b` feature-branch count (`⑂N`, green — local branches excluding `main`/`dev`), `s` stash count (`≡N`). The git-derived columns (`a`/`d`/`l`/`b`/`s`) fetch per-repo details in the background the first time one is enabled (cells show `…` until ready); `w` is free from worktree discovery. Enabled columns persist across runs.
 
 ### Info panel (`i`)
 
-`i` swaps the right pane between the pull log and an info view for the selected repo: status + elapsed, branch, ahead/behind vs upstream, remote, last commit (hash · subject · author · relative date), worktrees, uncommitted/stash counts, and the local path. The extra git facts are fetched lazily for the selected repo only. Any navigation returns the pane to the log. `c` starts claude code (`cc`, i.e. `claude --dangerously-skip-permissions`, in the repo dir; override with `PULL_CLAUDE_CMD`).
+`i` toggles an info block above the right pane's content (the pull log or the diff) for the selected repo: status + elapsed, branch, ahead/behind vs upstream, remote, last commit (hash · subject · author · relative date), worktrees, uncommitted/stash counts, and the local path. The block is additive — the log/diff stays beneath it — and tracks the selection as you move. The extra git facts are fetched lazily for the selected repo only. `c` starts claude code (`cc`, i.e. `claude --dangerously-skip-permissions`, in the repo dir; override with `PULL_CLAUDE_CMD`).
 
 ### Help modal (`?`)
 

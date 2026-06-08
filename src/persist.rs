@@ -8,9 +8,7 @@ use crate::app::ColumnFlags;
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PersistedState {
     pub columns: ColumnFlags,
-    /// The info view (`i`) was active on last exit.
-    pub info_active: bool,
-    /// The pinned info section (`I`) was on.
+    /// The info block (`i`) was shown on last exit.
     pub info_pinned: bool,
     /// Left/right splitter position.
     pub split_ratio: f64,

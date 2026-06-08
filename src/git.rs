@@ -5,6 +5,9 @@ use tokio::process::Command;
 
 use crate::app::{BranchInfo, RepoDetails, StashInfo, WorktreeInfo};
 
+/// Branches excluded from the feature-branch count.
+const EXCLUDED_BRANCHES: [&str; 2] = ["main", "dev"];
+
 /// Result of parsing git pull output to determine status.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PullOutcome {
@@ -241,6 +244,20 @@ pub async fn get_repo_details(dir: &Path) -> RepoDetails {
             .lines()
             .filter(|line| !line.trim().is_empty())
             .count() as u32;
+    }
+
+    if let Ok(output) = Command::new("git")
+        .args(["-C", dir_str, "for-each-ref", "--format=%(refname:short)", "refs/heads"])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            details.branch_count = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|name| !name.is_empty() && !EXCLUDED_BRANCHES.contains(name))
+                .count() as u32;
+        }
     }
 
     details
@@ -572,6 +589,34 @@ pub async fn delete_branch(dir: &Path, branch: &str, force: bool) -> Result<(), 
     }
 }
 
+/// The files contained in a stash entry (`git stash show --name-only stash@{index}`), relative
+/// to the repo root. Used to show what a drop would throw away.
+pub async fn stash_files(dir: &Path, index: usize) -> Result<Vec<String>, String> {
+    let dir_str = dir.to_str().unwrap_or(".");
+    let stash_ref = format!("stash@{{{index}}}");
+    let output = Command::new("git")
+        .args([
+            "-C",
+            dir_str,
+            "stash",
+            "show",
+            "--include-untracked",
+            "--name-only",
+            &stash_ref,
+        ])
+        .output()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect())
+}
+
 /// Drop a stash entry (`git stash drop stash@{index}`).
 pub async fn drop_stash(dir: &Path, index: usize) -> Result<(), String> {
     let dir_str = dir.to_str().unwrap_or(".");
@@ -607,6 +652,65 @@ pub async fn remove_worktree(dir: &Path, path: &Path, force: bool) -> Result<(),
         Ok(())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+/// The working-tree changes a discard would touch: `restore` lists tracked files that
+/// `reset --hard` would revert, `delete` lists untracked files that `clean -fd` would remove.
+/// Both are paths relative to the repo root, parsed from `git status --porcelain`.
+pub async fn discard_status(dir: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+    let dir_str = dir.to_str().unwrap_or(".");
+    let output = Command::new("git")
+        .args(["-C", dir_str, "status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let mut restore = Vec::new();
+    let mut delete = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let status = &line[..2];
+        // Porcelain renames render as "R  old -> new"; the new path is what's on disk.
+        let path = line[3..]
+            .split_once(" -> ")
+            .map(|(_, new)| new)
+            .unwrap_or(&line[3..])
+            .to_string();
+        if status == "??" {
+            delete.push(path);
+        } else {
+            restore.push(path);
+        }
+    }
+    Ok((restore, delete))
+}
+
+/// Discard every uncommitted change in `dir`: `reset --hard` reverts tracked files and
+/// `clean -fd` removes untracked files/dirs (ignored files are left in place).
+pub async fn discard_changes(dir: &Path) -> Result<(), String> {
+    let dir_str = dir.to_str().unwrap_or(".");
+    let reset = Command::new("git")
+        .args(["-C", dir_str, "reset", "--hard"])
+        .output()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !reset.status.success() {
+        return Err(String::from_utf8_lossy(&reset.stderr).trim().to_string());
+    }
+    let clean = Command::new("git")
+        .args(["-C", dir_str, "clean", "-fd"])
+        .output()
+        .await
+        .map_err(|err| err.to_string())?;
+    if clean.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&clean.stderr).trim().to_string())
     }
 }
 

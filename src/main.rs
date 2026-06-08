@@ -16,12 +16,14 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use clap::Parser;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
-    MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+    KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -31,9 +33,10 @@ use app::{
     PageRowKind, RepoState, RepoStatus, RightView, SharedRepoState,
 };
 use worker::{
-    run_all_details, run_all_pulls, run_checkout, run_delete, run_diff_modal, run_drop_stash,
-    run_pull_all_branches, run_pull_branch, run_remote_url_discovery, run_remove_worktree,
-    run_repo_details, run_repo_diff, run_repo_page, run_worktree_discovery,
+    run_all_details, run_all_pulls, run_checkout, run_delete, run_diff_modal, run_discard_changes,
+    run_drop_stash, run_prepare_discard, run_prepare_drop_stash, run_pull_all_branches, run_pull_branch,
+    run_remote_url_discovery, run_remove_worktree, run_repo_details, run_repo_diff, run_repo_page,
+    run_worktree_discovery,
 };
 
 /// Interactive multi-repo git pull dashboard.
@@ -179,6 +182,7 @@ fn launch_claude(
 ) -> Result<()> {
     let command = std::env::var("PULL_CLAUDE_CMD").unwrap_or_else(|_| "cc".to_string());
 
+    pop_key_enhancement(terminal);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
@@ -192,8 +196,28 @@ fn launch_claude(
 
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+    push_key_enhancement(terminal);
     terminal.clear()?;
     Ok(())
+}
+
+/// Push the Kitty keyboard protocol flags when the terminal supports them, so modified keys
+/// (notably Shift+Enter) are reported with their modifier instead of as a bare Enter.
+/// Best-effort — a no-op on terminals without support.
+fn push_key_enhancement(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        let _ = execute!(
+            terminal.backend_mut(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
+}
+
+/// Pop the keyboard enhancement flags pushed by `push_key_enhancement`.
+fn pop_key_enhancement(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
 }
 
 /// Apply a command triggered by key OR by clicking its status-bar hint. Returns
@@ -217,11 +241,7 @@ fn dispatch_command(command: Cmd, app: &mut AppState, retry_queue: &mut Vec<usiz
         }
         Cmd::RefetchAll => retry_queue.extend(app.refetchable_repos()),
         Cmd::Info => {
-            app.right_view = if app.right_view == RightView::Info {
-                RightView::Log
-            } else {
-                RightView::Info
-            };
+            app.info_pinned = !app.info_pinned;
         }
         Cmd::Help => {
             app.show_help = true;
@@ -259,51 +279,45 @@ fn dispatch_command(command: Cmd, app: &mut AppState, retry_queue: &mut Vec<usiz
 /// branch (which can't be deleted); the danger flag scales the dialog's severity.
 fn confirm_for_row(repo_idx: usize, row: &PageRow) -> Option<ConfirmDialog> {
     match row.kind {
-        PageRowKind::Stash => {
-            let index = row.stash_index?;
-            Some(ConfirmDialog {
-                message: format!("Drop stash@{{{index}}}? Stashed changes will be lost."),
-                action: ConfirmAction::DropStash { repo_idx, index },
-                danger: true,
-            })
-        }
+        // Stash drops are routed through run_prepare_drop_stash (to list the stash's files).
+        PageRowKind::Stash => None,
         PageRowKind::Worktree => {
             let mut message = format!("Remove worktree {}?", row.path.display());
             if row.dirty {
                 message.push_str(" Uncommitted changes will be LOST.");
             }
-            Some(ConfirmDialog {
+            Some(ConfirmDialog::simple(
                 message,
-                action: ConfirmAction::RemoveWorktree {
+                ConfirmAction::RemoveWorktree {
                     repo_idx,
                     path: row.path.clone(),
                     force: row.dirty,
                 },
-                danger: row.dirty,
-            })
+                row.dirty,
+            ))
         }
         PageRowKind::Branch if row.is_head => None,
-        PageRowKind::Branch if row.deletable => Some(ConfirmDialog {
-            message: format!("Delete branch '{}'?", row.branch),
-            action: ConfirmAction::DeleteBranch {
+        PageRowKind::Branch if row.deletable => Some(ConfirmDialog::simple(
+            format!("Delete branch '{}'?", row.branch),
+            ConfirmAction::DeleteBranch {
                 repo_idx,
                 branch: row.branch.clone(),
                 force: false,
             },
-            danger: false,
-        }),
-        PageRowKind::Branch => Some(ConfirmDialog {
-            message: format!(
+            false,
+        )),
+        PageRowKind::Branch => Some(ConfirmDialog::simple(
+            format!(
                 "Force-delete unmerged branch '{}'? Unmerged commits will be lost.",
                 row.branch
             ),
-            action: ConfirmAction::DeleteBranch {
+            ConfirmAction::DeleteBranch {
                 repo_idx,
                 branch: row.branch.clone(),
                 force: true,
             },
-            danger: true,
-        }),
+            true,
+        )),
     }
 }
 
@@ -384,12 +398,18 @@ async fn run_tui(
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    push_key_enhancement(&mut terminal);
 
     // Ensure terminal is restored on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            io::stdout(),
+            PopKeyboardEnhancementFlags,
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        );
         original_hook(panic_info);
     }));
 
@@ -420,6 +440,7 @@ async fn run_tui(
     app_state.lock().unwrap().save_state();
 
     // Restore terminal
+    pop_key_enhancement(&mut terminal);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
@@ -799,6 +820,9 @@ async fn run_event_loop(
                                     ConfirmAction::RemoveWorktree { repo_idx, path, force } => {
                                         tokio::spawn(run_remove_worktree(app_state_clone, repo_idx, path, force));
                                     }
+                                    ConfirmAction::DiscardChanges { repo_idx, path } => {
+                                        tokio::spawn(run_discard_changes(app_state_clone, repo_idx, path));
+                                    }
                                 }
                                 continue;
                             }
@@ -862,31 +886,31 @@ async fn run_event_loop(
                                 let repo_path = app.repos[idx].lock().unwrap().path.clone();
                                 match source {
                                     DiffSource::Stash { index, .. } => {
-                                        app.confirm = Some(ConfirmDialog {
-                                            message: format!(
-                                                "Drop stash@{{{index}}}? Stashed changes will be lost."
-                                            ),
-                                            action: ConfirmAction::DropStash { repo_idx: idx, index },
-                                            danger: true,
-                                        });
+                                        let app_state_clone = Arc::clone(&app_state);
+                                        drop(app);
+                                        tokio::spawn(run_prepare_drop_stash(app_state_clone, idx, index));
+                                        continue;
                                     }
+                                    // The checked-out branch: discard its uncommitted changes.
                                     DiffSource::Dirty { path, .. } if path == repo_path => {
-                                        app.repo_page_message =
-                                            Some("can't delete the current branch".to_string());
+                                        let app_state_clone = Arc::clone(&app_state);
+                                        drop(app);
+                                        tokio::spawn(run_prepare_discard(app_state_clone, idx, path));
+                                        continue;
                                     }
                                     DiffSource::Dirty { path, .. } => {
-                                        app.confirm = Some(ConfirmDialog {
-                                            message: format!(
+                                        app.confirm = Some(ConfirmDialog::simple(
+                                            format!(
                                                 "Remove worktree {}? Uncommitted changes will be LOST.",
                                                 path.display()
                                             ),
-                                            action: ConfirmAction::RemoveWorktree {
+                                            ConfirmAction::RemoveWorktree {
                                                 repo_idx: idx,
                                                 path,
                                                 force: true,
                                             },
-                                            danger: true,
-                                        });
+                                            true,
+                                        ));
                                     }
                                 }
                             }
@@ -925,16 +949,8 @@ async fn run_event_loop(
                         KeyCode::PageUp => {
                             app.repo_page_scroll = app.repo_page_scroll.saturating_sub(10);
                         }
-                        // Enter on a stash or a dirty row opens its diff modal; on a clean
-                        // non-HEAD branch it checks the branch out.
-                        KeyCode::Enter | KeyCode::Char(' ') => {
-                            if let Some(source) = app.diff_source_for_selected() {
-                                app.open_diff_modal(source);
-                                let app_state_clone = Arc::clone(&app_state);
-                                drop(app);
-                                tokio::spawn(run_diff_modal(app_state_clone));
-                                continue;
-                            }
+                        // Shift+Enter checks out the selected (clean, non-HEAD) branch.
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                             if let (Some(idx), Some(row)) = (app.repo_page, app.repo_page_target()) {
                                 if row.kind == PageRowKind::Branch && !row.is_head {
                                     let app_state_clone = Arc::clone(&app_state);
@@ -944,13 +960,37 @@ async fn run_event_loop(
                                 }
                             }
                         }
+                        // Enter (or Space) on a stash or a dirty row opens its diff modal;
+                        // Shift+Enter checks a branch out instead (handled above).
+                        KeyCode::Enter | KeyCode::Char(' ') => {
+                            if let Some(source) = app.diff_source_for_selected() {
+                                app.open_diff_modal(source);
+                                let app_state_clone = Arc::clone(&app_state);
+                                drop(app);
+                                tokio::spawn(run_diff_modal(app_state_clone));
+                                continue;
+                            }
+                        }
                         // Clear/delete the selected row (stash drop / worktree remove / branch
                         // delete) after a confirmation dialog whose severity scales with danger.
                         KeyCode::Char('d') => {
                             if let (Some(idx), Some(row)) = (app.repo_page, app.repo_page_target()) {
+                                // Stash drop gathers the stash's files for the confirm dialog.
+                                if let (PageRowKind::Stash, Some(index)) = (row.kind, row.stash_index) {
+                                    let app_state_clone = Arc::clone(&app_state);
+                                    drop(app);
+                                    tokio::spawn(run_prepare_drop_stash(app_state_clone, idx, index));
+                                    continue;
+                                }
                                 if let Some(dialog) = confirm_for_row(idx, &row) {
                                     app.confirm = Some(dialog);
                                 } else if row.kind == PageRowKind::Branch && row.is_head {
+                                    if row.dirty {
+                                        let app_state_clone = Arc::clone(&app_state);
+                                        drop(app);
+                                        tokio::spawn(run_prepare_discard(app_state_clone, idx, row.path));
+                                        continue;
+                                    }
                                     app.repo_page_message =
                                         Some("can't delete the current branch".to_string());
                                 }
@@ -1043,19 +1083,33 @@ async fn run_event_loop(
                     continue;
                 }
 
-                // `t` toggle mode: stays active so multiple columns can be toggled (a/d/l/w);
-                // `t` again or Esc exits, any other key is swallowed to avoid stray navigation.
+                // `t` toggle mode: stays active so multiple columns can be toggled (a/d/l/w/b/s);
+                // `t` again or Esc exits. Navigation keys (up/down/home/end/enter) exit the mode
+                // and then run normally (fall through); any other key is swallowed.
                 if app.pending_leader == Some(Leader::Toggle) {
                     match key.code {
                         KeyCode::Char('a') => app.toggle_column(Column::AheadBehind),
                         KeyCode::Char('d') => app.toggle_column(Column::Dirty),
                         KeyCode::Char('l') => app.toggle_column(Column::LastCommit),
                         KeyCode::Char('w') => app.toggle_column(Column::Worktrees),
+                        KeyCode::Char('b') => app.toggle_column(Column::Branches),
                         KeyCode::Char('s') => app.toggle_column(Column::Stashes),
-                        KeyCode::Char('t') | KeyCode::Esc => app.pending_leader = None,
-                        _ => {}
+                        KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End | KeyCode::Enter => {
+                            // Exit toggle mode and let the key run normally below.
+                            app.pending_leader = None;
+                        }
+                        _ => {
+                            // `t` again, Esc, or any other key: exit (or stay) without acting.
+                            if matches!(key.code, KeyCode::Char('t') | KeyCode::Esc) {
+                                app.pending_leader = None;
+                            }
+                            continue;
+                        }
                     }
-                    continue;
+                    // Column toggles took their action above and stay in toggle mode.
+                    if app.pending_leader == Some(Leader::Toggle) {
+                        continue;
+                    }
                 }
 
                 // Normal key handling
@@ -1173,16 +1227,8 @@ async fn run_event_loop(
                         }
                     }
 
-                    // Toggle the per-repo info view in the right pane.
+                    // Toggle the info block above the log/diff (tracks the selection).
                     (KeyCode::Char('i'), _) => {
-                        app.right_view = if app.right_view == RightView::Info {
-                            RightView::Log
-                        } else {
-                            RightView::Info
-                        };
-                    }
-                    // Toggle a pinned info section above the log/diff (persists while navigating).
-                    (KeyCode::Char('I'), _) => {
                         app.info_pinned = !app.info_pinned;
                     }
                     // Toggle the per-repo diff view in the right pane.
@@ -1318,30 +1364,28 @@ async fn run_event_loop(
         // Lazily fetch details/diff for the selected repo when those views are open.
         {
             let app = app_state.lock().unwrap();
-            match app.right_view {
-                RightView::Info => {
-                    if let Some(idx) = app.selected_repo_index() {
-                        let repo = Arc::clone(&app.repos[idx]);
-                        let mut state = repo.lock().unwrap();
-                        if state.details.is_none() && !state.details_loading {
-                            state.details_loading = true;
-                            drop(state);
-                            tokio::spawn(run_repo_details(repo));
-                        }
+            // The info block (`i`) needs details, regardless of the log/diff view beneath it.
+            if app.info_pinned {
+                if let Some(idx) = app.selected_repo_index() {
+                    let repo = Arc::clone(&app.repos[idx]);
+                    let mut state = repo.lock().unwrap();
+                    if state.details.is_none() && !state.details_loading {
+                        state.details_loading = true;
+                        drop(state);
+                        tokio::spawn(run_repo_details(repo));
                     }
                 }
-                RightView::Diff => {
-                    if let Some(idx) = app.selected_repo_index() {
-                        let repo = Arc::clone(&app.repos[idx]);
-                        let mut state = repo.lock().unwrap();
-                        if state.diff.is_none() {
-                            state.diff = Some(vec!["(loading…)".to_string()]);
-                            drop(state);
-                            tokio::spawn(run_repo_diff(repo));
-                        }
+            }
+            if app.right_view == RightView::Diff {
+                if let Some(idx) = app.selected_repo_index() {
+                    let repo = Arc::clone(&app.repos[idx]);
+                    let mut state = repo.lock().unwrap();
+                    if state.diff.is_none() {
+                        state.diff = Some(vec!["(loading…)".to_string()]);
+                        drop(state);
+                        tokio::spawn(run_repo_diff(repo));
                     }
                 }
-                RightView::Log => {}
             }
         }
 
