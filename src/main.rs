@@ -201,6 +201,38 @@ fn launch_claude(
     Ok(())
 }
 
+/// Whether `lazygit` is on `$PATH` (cheap `--version` probe, run only when `l` is pressed).
+fn lazygit_available() -> bool {
+    Command::new("lazygit")
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Suspend the TUI, run `lazygit` in `path`, then restore the alternate screen and mouse capture
+/// (mirrors `launch_claude`).
+fn launch_lazygit(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    path: &std::path::Path,
+) -> Result<()> {
+    pop_key_enhancement(terminal);
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    terminal.show_cursor()?;
+
+    let _ = Command::new("lazygit").arg("--path").arg(path).status();
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+    push_key_enhancement(terminal);
+    terminal.clear()?;
+    Ok(())
+}
+
 /// Push the Kitty keyboard protocol flags when the terminal supports them, so modified keys
 /// (notably Shift+Enter) are reported with their modifier instead of as a bare Enter.
 /// Best-effort — a no-op on terminals without support.
@@ -578,6 +610,8 @@ async fn run_event_loop(
 
     // Set when `c` is pressed; the TUI is suspended to run claude code after event handling.
     let mut pending_claude: Option<std::path::PathBuf> = None;
+    // Set when `l` is pressed; the TUI is suspended to run lazygit after event handling.
+    let mut pending_lazygit: Option<std::path::PathBuf> = None;
 
     // Last left-click (time, selection) for synthesizing double-click → open repo page.
     let mut last_click: Option<(Instant, usize)> = None;
@@ -586,6 +620,24 @@ async fn run_event_loop(
         // Suspend the TUI and run claude code when requested (set by a key/click last iteration).
         if let Some(path) = pending_claude.take() {
             launch_claude(terminal, &path)?;
+        }
+
+        // Suspend the TUI and run lazygit when requested, or note that it isn't installed.
+        if let Some(path) = pending_lazygit.take() {
+            if lazygit_available() {
+                launch_lazygit(terminal, &path)?;
+            } else {
+                let mut app = app_state.lock().unwrap();
+                if app.repo_page.is_some() {
+                    app.repo_page_message = Some("lazygit not found on PATH".to_string());
+                } else if let Some(idx) = app.selected_repo_index() {
+                    app.repos[idx]
+                        .lock()
+                        .unwrap()
+                        .log
+                        .push("lazygit not found on PATH".to_string());
+                }
+            }
         }
 
         // Update the "all done" edge. Selection is never moved automatically — it stays wherever
@@ -654,6 +706,7 @@ async fn run_event_loop(
         // Render
         {
             let mut app = app_state.lock().unwrap();
+            app.divider_dragging = dragging_divider;
             terminal.draw(|frame| render::render(frame, &mut app, tick))?;
         }
 
@@ -1173,6 +1226,12 @@ async fn run_event_loop(
                                 pending_claude = Some(row.path);
                             }
                         }
+                        // Open lazygit in the selected row's path.
+                        KeyCode::Char('l') => {
+                            if let Some(row) = app.repo_page_target() {
+                                pending_lazygit = Some(row.path);
+                            }
+                        }
                         // Copy the selected row's path.
                         KeyCode::Char('y') => {
                             if let Some(row) = app.repo_page_target() {
@@ -1370,6 +1429,13 @@ async fn run_event_loop(
                     (KeyCode::Tab, _) => {
                         app.preview_focused = !app.preview_focused;
                     }
+                    // `1`/`2`: focus the list / preview pane directly (lazygit-style).
+                    (KeyCode::Char('1'), _) => {
+                        app.preview_focused = false;
+                    }
+                    (KeyCode::Char('2'), _) => {
+                        app.preview_focused = true;
+                    }
 
                     // Space: toggle the Result preview overlay (temporary switch).
                     (KeyCode::Char(' '), _) => {
@@ -1525,6 +1591,12 @@ async fn run_event_loop(
                     (KeyCode::Char('c'), _) => {
                         if let Some(idx) = app.selected_repo_index() {
                             pending_claude = Some(app.repos[idx].lock().unwrap().path.clone());
+                        }
+                    }
+                    // Open lazygit in the selected repo (suspends the TUI like `c`).
+                    (KeyCode::Char('l'), _) => {
+                        if let Some(idx) = app.selected_repo_index() {
+                            pending_lazygit = Some(app.repos[idx].lock().unwrap().path.clone());
                         }
                     }
 

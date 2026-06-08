@@ -710,6 +710,8 @@ pub struct AppState {
     pub preview_scroll_area: Rect,
     /// Column of the divider between the panes (= preview_area.x).
     pub divider_col: u16,
+    /// True while the user is dragging the pane divider (drives the live drag highlight).
+    pub divider_dragging: bool,
     /// Scroll offset of the list widget, read back after render for row hit-testing.
     pub list_offset: usize,
     /// What the right pane shows for the selected repo (log, info, or diff).
@@ -803,6 +805,7 @@ impl AppState {
             preview_viewport: 0,
             preview_scroll_area: Rect::default(),
             divider_col: 0,
+            divider_dragging: false,
             list_offset: 0,
             right_view: RightView::Log,
             info_pinned: persisted.info_pinned,

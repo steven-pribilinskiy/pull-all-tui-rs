@@ -1,4 +1,4 @@
-// Single source of truth for the keymap, mirroring src/main.rs + src/render.rs (v0.16.0).
+// Single source of truth for the keymap, mirroring src/main.rs + src/render.rs (v0.17.0).
 // Keep this in sync with the event loop when bindings change.
 
 export type Binding = {
@@ -29,7 +29,8 @@ export const keymap: KeymapSection[] = [
       { keys: ['g'], action: 'Jump to top' },
       { keys: ['G'], action: 'Jump to bottom', note: 'the Result summary row' },
       { keys: ['Space'], action: 'Toggle the Result/Errors summary in the preview', note: 'any navigation clears it' },
-      { keys: ['Tab'], action: 'Toggle focus: list ↔ preview' },
+      { keys: ['Tab'], action: 'Toggle focus: list [1] ↔ preview [2]', note: 'the active pane gets a bright rounded border' },
+      { keys: ['1', '2'], action: 'Focus the list / preview pane directly', keywords: ['panel', 'pane', 'focus'] },
       { keys: ['PgUp', 'PgDn'], action: 'Scroll the preview', note: 'when focused' },
       { keys: ['End'], action: 'Resume auto-scroll in the preview' },
       { keys: ['[', ']'], action: 'Narrow / widen the left pane' },
@@ -47,6 +48,7 @@ export const keymap: KeymapSection[] = [
       { keys: ['y'], action: "Copy the selected repo's absolute path" },
       { keys: ['Y'], action: "Copy the selected repo's remote (origin) URL" },
       { keys: ['c'], action: 'Start claude code in the selected repo', note: 'suspends the TUI; PULL_CLAUDE_CMD overrides' },
+      { keys: ['l'], action: 'Open lazygit in the selected repo', note: 'suspends the TUI; warns if lazygit is not installed', keywords: ['lazygit', 'git ui'] },
       { keys: ['x'], action: "Clear this repo's log buffer", note: 'empties the streamed pull output' },
       { keys: ['D'], action: 'Open the documentation website in the browser', keywords: ['docs', 'help website'] },
       { keys: [','], action: 'Open the settings modal', note: 'panel padding · icon style (Unicode/emoji)', keywords: ['settings', 'preferences', 'config', 'emoji', 'padding'] },
@@ -72,6 +74,7 @@ export const keymap: KeymapSection[] = [
       { keys: ['o'], action: 'Open the selected branch on the remote' },
       { keys: ['y'], action: "Copy the selected row's path" },
       { keys: ['c'], action: "Start claude code in the row's path" },
+      { keys: ['l'], action: "Open lazygit in the row's path" },
       { keys: ['Esc', 'q'], action: 'Back to the repo list' },
     ],
   },

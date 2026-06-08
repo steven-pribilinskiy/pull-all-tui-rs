@@ -77,8 +77,9 @@ The `cli` backend (`pull-all-repos`, the original parallel-pull bash script that
 | `g` | Jump to top |
 | `G` | Jump to bottom (Result item) |
 | `Space` | Toggle the Result summary in the preview without moving selection (any navigation clears it) |
-| `[` / `]` | Narrow / widen the left pane |
-| `Tab` | Toggle focus: list ↔ preview |
+| `[` / `]` | Narrow / widen the left pane (or drag the divider — it shows a grip, and highlights while dragging) |
+| `Tab` | Toggle focus: list `[1]` ↔ preview `[2]` (the active pane gets a bright rounded border) |
+| `1` / `2` | Focus the list / preview pane directly |
 | `PgUp` / `PgDn` | Scroll preview (when focused) |
 | `End` | Resume auto-scroll in preview |
 | `Enter` / double-click | Open the dedicated repo page for the selected repo (on the repo list) |
@@ -95,6 +96,7 @@ The `cli` backend (`pull-all-repos`, the original parallel-pull bash script that
 | `y` | Copy the selected repo's **absolute path** to the clipboard |
 | `Y` | Copy the selected repo's **remote (origin) URL** to the clipboard |
 | `c` | Start claude code in the selected repo (suspends the TUI, returns on exit) |
+| `l` | Open **lazygit** in the selected repo (suspends the TUI, returns on exit) |
 | `x` | Clear **this repo's log buffer** (empties the streamed pull output) |
 | `D` | Open the [documentation website](https://steven-pribilinskiy.github.io/pull-all/) in the browser |
 | `,` | Open the settings modal (panel padding, icon style) |

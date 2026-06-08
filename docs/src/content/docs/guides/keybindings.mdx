@@ -20,6 +20,11 @@ import KeymapExplorer from '../../../components/KeymapExplorer.astro';
   re-pick or re-click flips `▲`/`▼`. The order persists across runs.
 - **Status filter moved to `f`** — `f` then `a`/`u`/`c`/`s`/`f`/`i` filters the list by
   status (on top of the `/` name filter); `s` is now the sort leader.
+- **Panes** — the focused pane (`Tab`, or `1`/`2`) shows a bright rounded border and a `[1]`/`[2]`
+  label; the divider shows a grip and highlights while you drag it.
+- **`l` opens lazygit** — suspends the TUI and runs lazygit in the selected repo (or the selected
+  row's path on the repo page), returning when you quit it. If lazygit isn't installed, a note
+  appears instead.
 - **Checkout moved to `Shift`+`Enter`** — on the repo page, plain `Enter` (and a
   double-click) opens the diff for a stash or dirty row. `Shift`+`Enter` checks out the
   selected clean, non-current branch, so the two actions no longer collide.

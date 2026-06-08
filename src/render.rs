@@ -3,7 +3,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar,
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar,
     ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::Frame;
@@ -21,6 +21,15 @@ pub const DOCS_URL: &str = "https://steven-pribilinskiy.github.io/pull-all/";
 /// list status glyph and the repo-page loading indicator so they animate identically.
 fn spinner_frame(tick: u64, icons: &IconSet) -> &'static str {
     icons.spinner[(tick as usize / 2) % icons.spinner.len()]
+}
+
+/// Border color for a main pane: a bright accent when it's the focused pane, dim otherwise.
+fn pane_border_style(active: bool) -> Style {
+    if active {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
 }
 
 /// 1-cell inner padding for every bordered panel/modal when the setting is on; none otherwise.
@@ -133,6 +142,9 @@ pub fn render(frame: &mut Frame, app: &mut AppState, tick: u64) {
     // Render status bar
     render_status_bar(frame, app, status_bar_area);
 
+    // Draw the draggable divider grip (and a live highlight while it's being dragged).
+    render_divider(frame, app);
+
     // Help modal overlays everything else.
     if app.show_help {
         render_help(frame, app, area);
@@ -144,6 +156,64 @@ pub fn render(frame: &mut Frame, app: &mut AppState, tick: u64) {
     // Settings modal overlays everything.
     if app.show_settings {
         render_settings(frame, app, area);
+    }
+}
+
+/// Draw a grip marker at the center of the pane divider so it reads as draggable, and—while a
+/// drag is in progress—brighten the whole divider column for live feedback.
+fn render_divider(frame: &mut Frame, app: &AppState) {
+    let area = app.main_area;
+    let col = app.divider_col;
+    if area.height < 3 || col <= area.x || col >= area.x + area.width {
+        return;
+    }
+    let top = area.y + 1;
+    let bottom = area.y + area.height - 1;
+    let center = area.y + area.height / 2;
+    let dragging = app.divider_dragging;
+    let buffer = frame.buffer_mut();
+
+    if dragging {
+        for row in top..bottom {
+            if let Some(cell) = buffer.cell_mut((col, row)) {
+                cell.set_fg(Color::Cyan);
+            }
+        }
+    }
+
+    // A short heavy run at center hints "grab here"; brighter (and cyan) while dragging.
+    let grip_color = if dragging { Color::Cyan } else { Color::Gray };
+    for offset in 0..3u16 {
+        let row = center.saturating_sub(1) + offset;
+        if row >= top && row < bottom {
+            if let Some(cell) = buffer.cell_mut((col, row)) {
+                cell.set_symbol("┃").set_fg(grip_color);
+            }
+        }
+    }
+}
+
+/// Cast a drop-shadow for a modal: dim the cells on the 1-col strip down the right edge and the
+/// 1-row strip across the bottom, offset by +1 — call before the modal's `Clear` so the shadow
+/// falls on the underlying UI just outside the box.
+fn cast_shadow(frame: &mut Frame, area: Rect) {
+    let bounds = frame.area();
+    let buffer = frame.buffer_mut();
+    let shadow_x = area.x + area.width;
+    for row in (area.y + 1)..(area.y + area.height + 1) {
+        if shadow_x < bounds.right() && row < bounds.bottom() {
+            if let Some(cell) = buffer.cell_mut((shadow_x, row)) {
+                cell.set_bg(Color::Black).set_fg(Color::DarkGray);
+            }
+        }
+    }
+    let shadow_y = area.y + area.height;
+    for col in (area.x + 1)..(area.x + area.width + 1) {
+        if col < bounds.right() && shadow_y < bounds.bottom() {
+            if let Some(cell) = buffer.cell_mut((col, shadow_y)) {
+                cell.set_bg(Color::Black).set_fg(Color::DarkGray);
+            }
+        }
     }
 }
 
@@ -212,14 +282,15 @@ fn render_list(frame: &mut Frame, app: &mut AppState, area: Rect, tick: u64) -> 
 
     let done = app.done_count();
     let title = format!(
-        " pull-all · {done}/{total_repos} · {elapsed:.1}s "
+        " [1] pull-all · {done}/{total_repos} · {elapsed:.1}s "
     );
 
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .padding(panel_pad(app))
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(pane_border_style(!app.preview_focused));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -610,7 +681,8 @@ fn render_preview(frame: &mut Frame, app: &mut AppState, area: Rect, _tick: u64)
     let area = if app.info_pinned && on_repo {
         let repo_idx = visible[app.selected];
         let name = app.repos[repo_idx].lock().unwrap().name.clone();
-        let lines = build_info_lines(app, repo_idx);
+        let info_width = area.width.saturating_sub(if app.panel_padding { 4 } else { 2 }) as usize;
+        let lines = build_info_lines(app, repo_idx, info_width);
         // +2 for the border, +2 more for inner padding when the setting is on.
         let chrome = if app.panel_padding { 4 } else { 2 };
         let desired = (lines.len() as u16 + chrome).min(area.height / 2).max(3);
@@ -661,18 +733,12 @@ fn render_preview(frame: &mut Frame, app: &mut AppState, area: Rect, _tick: u64)
         }
     };
 
-    let focused = app.preview_focused;
-    let border_style = if focused {
-        Style::default().fg(Color::White)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
     let block = Block::default()
-        .title(header_text)
+        .title(format!(" [2]{header_text}"))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .padding(panel_pad(app))
-        .border_style(border_style);
+        .border_style(pane_border_style(app.preview_focused));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -706,7 +772,7 @@ fn render_preview(frame: &mut Frame, app: &mut AppState, area: Rect, _tick: u64)
 /// worktrees, changes, path) plus a command-hint footer, for the selected repo.
 /// Build the per-repo info content lines (status, branch, ahead/behind, commit, changes,
 /// remote, worktrees, path) — shared by the full info view and the pinned info section.
-fn build_info_lines(app: &AppState, repo_idx: usize) -> Vec<Line<'static>> {
+fn build_info_lines(app: &AppState, repo_idx: usize, content_width: usize) -> Vec<Line<'static>> {
     let state = app.repos[repo_idx].lock().unwrap();
 
     let label = Style::default().fg(Color::DarkGray);
@@ -746,12 +812,21 @@ fn build_info_lines(app: &AppState, repo_idx: usize) -> Vec<Line<'static>> {
         if details.commit_hash.is_empty() {
             lines.push(field("Last commit", "—".to_string()));
         } else {
+            // Three tidy rows — hash, subject, then (date, author) — each starting at the value
+            // column and truncated so a long subject never wraps back to the label column.
+            let value_width = content_width.saturating_sub(13).max(1);
             lines.push(field("Last commit", details.commit_hash.clone()));
             lines.push(Line::from(vec![
                 Span::styled(format!("{:<13}", ""), label),
-                Span::styled(format!("{}  ", details.commit_subject), value),
+                Span::styled(truncate_str(&details.commit_subject, value_width), value),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<13}", ""), label),
                 Span::styled(
-                    format!("({}, {})", details.commit_rel_date, details.commit_author),
+                    truncate_str(
+                        &format!("({}, {})", details.commit_rel_date, details.commit_author),
+                        value_width,
+                    ),
                     label,
                 ),
             ]));
@@ -797,16 +872,12 @@ fn build_info_lines(app: &AppState, repo_idx: usize) -> Vec<Line<'static>> {
 
 /// Render an info block (border + lines + scrollbar) into `area`.
 fn render_info_block(frame: &mut Frame, app: &AppState, area: Rect, title: String, lines: Vec<Line<'static>>) {
-    let border_style = if app.preview_focused {
-        Style::default().fg(Color::White)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .padding(panel_pad(app))
-        .border_style(border_style);
+        .border_style(pane_border_style(app.preview_focused));
     let inner = block.inner(area);
     let total = lines.len();
     frame.render_widget(block, area);
@@ -1479,6 +1550,7 @@ fn render_help(frame: &mut Frame, app: &mut AppState, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .padding(panel_pad(app))
         .border_style(Style::default().fg(Color::Cyan))
         .title(" pull-all — help ")
@@ -1529,6 +1601,7 @@ fn render_help(frame: &mut Frame, app: &mut AppState, area: Rect) {
         lines.push(line.clone());
     }
 
+    cast_shadow(frame, modal_area);
     frame.render_widget(Clear, modal_area);
     frame.render_widget(block, modal_area);
     frame.render_widget(Paragraph::new(tab_bar), tab_bar_area);
@@ -1587,31 +1660,41 @@ fn render_diff_modal(frame: &mut Frame, app: &mut AppState, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .padding(panel_pad(app))
         .border_style(Style::default().fg(Color::Cyan))
         .title(title)
         .title_bottom(Line::from(footer).right_aligned());
     let inner = block.inner(modal_area);
+    cast_shadow(frame, modal_area);
     frame.render_widget(Clear, modal_area);
     frame.render_widget(block, modal_area);
 
-    // File list takes up to 40% of the modal height (at least 1 row); the diff gets the rest.
-    let max_file_height = (inner.height * 4 / 10).max(1);
-    let file_height = (files.len() as u16).clamp(1, max_file_height);
+    // Two bordered sub-panels inside the modal: a file-list panel (≤40% height) over the diff
+    // panel. Each is its own scrollable box (the borders form the separator); padding follows
+    // the global setting.
+    let panel_chrome = if app.panel_padding { 4 } else { 2 };
+    let max_file_box = (inner.height * 4 / 10).max(3);
+    let wanted_file_box = files.len() as u16 + panel_chrome;
+    let file_box_height = wanted_file_box.clamp(3, max_file_box);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(file_height),
-            Constraint::Length(1),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(file_box_height), Constraint::Min(3)])
         .split(inner);
-    let file_area = chunks[0];
-    let divider_area = chunks[1];
-    let diff_area = chunks[2];
+    let file_box = chunks[0];
+    let diff_box = chunks[1];
 
-    // Keep the selected file visible within the file panel.
-    let view_rows = file_area.height as usize;
+    // ---- File-list panel ----
+    let file_panel = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .padding(panel_pad(app))
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(format!(" files ({}) ", files.len()));
+    let file_inner = file_panel.inner(file_box);
+    frame.render_widget(file_panel, file_box);
+
+    let view_rows = file_inner.height as usize;
     let mut file_scroll = file_scroll_in.min(files.len().saturating_sub(view_rows));
     if selected < file_scroll {
         file_scroll = selected;
@@ -1622,13 +1705,13 @@ fn render_diff_modal(frame: &mut Frame, app: &mut AppState, area: Rect) {
     if files.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " (no changed files)",
+                "(no changed files)",
                 Style::default().fg(Color::DarkGray),
             ))),
-            file_area,
+            file_inner,
         );
     } else {
-        let path_width = file_area.width.saturating_sub(5) as usize;
+        let path_width = file_inner.width.saturating_sub(5) as usize;
         let rows: Vec<Line> = files
             .iter()
             .enumerate()
@@ -1642,52 +1725,48 @@ fn render_diff_modal(frame: &mut Frame, app: &mut AppState, area: Rect) {
                 let path = Span::raw(truncate_str(&file.path, path_width.max(1)));
                 let line = Line::from(vec![status, path]);
                 if index == selected {
-                    line.style(
-                        Style::default()
-                            .bg(Color::DarkGray)
-                            .add_modifier(Modifier::BOLD),
-                    )
+                    line.style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
                 } else {
                     line
                 }
             })
             .collect();
-        frame.render_widget(Paragraph::new(rows), file_area);
-        render_scrollbar(frame, file_area, file_scroll, files.len(), view_rows);
+        frame.render_widget(Paragraph::new(rows), file_inner);
+        render_scrollbar(frame, file_box, file_scroll, files.len(), view_rows);
     }
 
-    // Divider showing how many files and which one is selected.
-    let divider_label = if files.is_empty() {
-        format!(" {} ", "─".repeat(20))
+    // ---- Diff panel ----
+    let diff_title = if files.is_empty() {
+        " diff ".to_string()
     } else {
-        format!(" file {}/{} ", selected + 1, files.len())
+        format!(" file {}/{} — {} ", selected + 1, files.len(), truncate_str(&files[selected].path, 40))
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            divider_label,
-            Style::default().fg(Color::DarkGray),
-        ))),
-        divider_area,
-    );
+    let diff_panel = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .padding(panel_pad(app))
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(diff_title);
+    let diff_inner = diff_panel.inner(diff_box);
+    frame.render_widget(diff_panel, diff_box);
 
-    // Selected file's diff.
-    let diff_view_h = diff_area.height as usize;
+    let diff_view_h = diff_inner.height as usize;
     let diff_total = diff_lines.len();
     let diff_scroll = diff_scroll_req.min(diff_total.saturating_sub(diff_view_h));
     let diff_view: Vec<Line> = diff_lines[diff_scroll..(diff_scroll + diff_view_h).min(diff_total)]
         .iter()
         .map(|line| ansi_line_to_ratatui(line))
         .collect();
-    frame.render_widget(Paragraph::new(diff_view), diff_area);
-    render_scrollbar(frame, modal_area, diff_scroll, diff_total, diff_view_h);
+    frame.render_widget(Paragraph::new(diff_view), diff_inner);
+    render_scrollbar(frame, diff_box, diff_scroll, diff_total, diff_view_h);
 
     if let Some(modal) = app.diff_modal.as_mut() {
         modal.scroll = diff_scroll;
         modal.file_scroll = file_scroll;
     }
     app.diff_modal_viewport = diff_view_h;
-    app.diff_files_area = file_area;
-    app.diff_body_area = diff_area;
+    app.diff_files_area = file_inner;
+    app.diff_body_area = diff_inner;
 }
 
 /// Fixed-width ahead/behind spans (`↑a ↓b`), each arrow colored by its own count: a zero
@@ -1724,7 +1803,7 @@ fn ahead_behind_spans(
                 Span::raw(" ".repeat(pad)),
             ]
         }
-        _ => vec![Span::styled(format!("{:<width$}", "—"), gray)],
+        _ => vec![Span::styled(format!("{:<width$}", "no-up"), gray)],
     }
 }
 
@@ -1767,11 +1846,12 @@ fn render_repo_page(frame: &mut Frame, app: &mut AppState, area: Rect, tick: u64
     }
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .padding(panel_pad(app))
         .border_style(Style::default().fg(Color::Cyan))
         .title(title)
         .title_bottom(
-            Line::from(" ↑↓ move · Home/End · enter/dbl-click diff (stash/dirty) · shift+enter checkout · p pull · P pull all · c claude · o open · y copy · d delete/drop/discard · esc back ")
+            Line::from(" ↑↓ move · enter/dbl-click diff · shift+enter checkout · p/P pull · l lazygit · c claude · o open · y copy · d delete/drop/discard · esc back ")
                 .right_aligned(),
         );
     let inner = block.inner(area);
@@ -1801,26 +1881,22 @@ fn render_repo_page(frame: &mut Frame, app: &mut AppState, area: Rect, tick: u64
         .unwrap_or(8)
         .min(120);
 
-    // (Line, Option<selectable index>) — None for headers/blanks/banners.
+    // Section header: a colored type icon for quick recognition, then the yellow label.
+    let section_header = |icon: &'static str, icon_color: Color, text: String| {
+        (
+            Line::from(vec![
+                Span::styled(format!("{icon} "), Style::default().fg(icon_color)),
+                Span::styled(text, header_style),
+            ]),
+            None,
+        )
+    };
+
+    // (Line, Option<selectable index>) — None for headers/blanks. The action banner / fetch
+    // error render in a fixed row at the bottom (below), not at the top of the list.
     let mut items: Vec<(Line<'static>, Option<usize>)> = Vec::new();
 
-    if let Some(message) = &app.repo_page_message {
-        items.push((
-            Line::from(Span::styled(format!(" {message}"), Style::default().fg(Color::Yellow))),
-            None,
-        ));
-    }
-    if let Some(error) = &fetch_error {
-        items.push((
-            Line::from(Span::styled(format!(" fetch: {error}"), Style::default().fg(Color::Red))),
-            None,
-        ));
-    }
-    if app.repo_page_message.is_some() || fetch_error.is_some() {
-        items.push((Line::from(String::new()), None));
-    }
-
-    items.push((Line::from(Span::styled(format!("BRANCHES ({branch_count})"), header_style)), None));
+    items.push(section_header(icons.branches, Color::Green, format!("BRANCHES ({branch_count})")));
     for (sel_index, row) in rows.iter().enumerate() {
         if row.kind != PageRowKind::Branch {
             continue;
@@ -1846,44 +1922,55 @@ fn render_repo_page(frame: &mut Frame, app: &mut AppState, area: Rect, tick: u64
         items.push((Line::from(line_spans), Some(sel_index)));
     }
 
-    items.push((Line::from(String::new()), None));
-    items.push((Line::from(Span::styled(format!("WORKTREES ({worktree_count})"), header_style)), None));
-    if worktree_count == 0 {
-        items.push((Line::from(Span::styled("  (none)", label)), None));
-    }
-    for (sel_index, row) in rows.iter().enumerate() {
-        if row.kind != PageRowKind::Worktree {
-            continue;
+    // Worktrees / stashes sections only appear when there's something to show.
+    if worktree_count > 0 {
+        items.push((Line::from(String::new()), None));
+        items.push(section_header(icons.worktrees, Color::Cyan, format!("WORKTREES ({worktree_count})")));
+        for (sel_index, row) in rows.iter().enumerate() {
+            if row.kind != PageRowKind::Worktree {
+                continue;
+            }
+            let mut line_spans = vec![
+                Span::styled(format!("  {:<name_pad$}", truncate_str(&row.branch, name_pad)), cyan),
+                Span::raw("  "),
+            ];
+            line_spans.extend(ahead_behind_spans(row.ahead, row.behind, 10, icons));
+            line_spans.push(dirty_marker(row.dirty));
+            line_spans.push(Span::styled(format!("  {}", row.path.display()), label));
+            items.push((Line::from(line_spans), Some(sel_index)));
         }
-        let mut line_spans = vec![
-            Span::styled(format!("  {:<name_pad$}", truncate_str(&row.branch, name_pad)), cyan),
-            Span::raw("  "),
-        ];
-        line_spans.extend(ahead_behind_spans(row.ahead, row.behind, 10, icons));
-        line_spans.push(dirty_marker(row.dirty));
-        line_spans.push(Span::styled(format!("  {}", row.path.display()), label));
-        items.push((Line::from(line_spans), Some(sel_index)));
     }
 
-    items.push((Line::from(String::new()), None));
-    items.push((Line::from(Span::styled(format!("STASHES ({stash_count})"), header_style)), None));
-    if stash_count == 0 {
-        items.push((Line::from(Span::styled("  (none)", label)), None));
-    }
-    for (sel_index, row) in rows.iter().enumerate() {
-        if row.kind != PageRowKind::Stash {
-            continue;
+    if stash_count > 0 {
+        items.push((Line::from(String::new()), None));
+        items.push(section_header(icons.stashes, Color::Magenta, format!("STASHES ({stash_count})")));
+        for (sel_index, row) in rows.iter().enumerate() {
+            if row.kind != PageRowKind::Stash {
+                continue;
+            }
+            let stash_ref = format!("stash@{{{}}}", row.stash_index.unwrap_or(0));
+            items.push((
+                Line::from(vec![
+                    Span::styled(format!("  {stash_ref:<10}"), Style::default().fg(Color::Magenta)),
+                    Span::styled(format!("  {}", truncate_str(&row.branch, 70)), value),
+                ]),
+                Some(sel_index),
+            ));
         }
-        let stash_ref = format!("stash@{{{}}}", row.stash_index.unwrap_or(0));
-        items.push((
-            Line::from(vec![
-                Span::styled(format!("  {stash_ref:<10}"), Style::default().fg(Color::Magenta)),
-                Span::styled(format!("  {}", truncate_str(&row.branch, 70)), value),
-            ]),
-            Some(sel_index),
-        ));
     }
 
+    // Reserve a fixed bottom row for the action banner / fetch error when present.
+    let banner = app
+        .repo_page_message
+        .clone()
+        .map(|message| (format!(" {message}"), Color::Yellow))
+        .or_else(|| fetch_error.as_ref().map(|error| (format!(" fetch: {error}"), Color::Red)));
+    let content = if banner.is_some() {
+        Rect { height: inner.height.saturating_sub(1), ..inner }
+    } else {
+        inner
+    };
+    let inner = content;
     let inner_height = inner.height as usize;
     let max_scroll = items.len().saturating_sub(inner_height);
     if app.repo_page_scroll > max_scroll {
@@ -1906,6 +1993,23 @@ fn render_repo_page(frame: &mut Frame, app: &mut AppState, area: Rect, tick: u64
     }
     frame.render_widget(Paragraph::new(lines), inner);
     render_scrollbar(frame, area, app.repo_page_scroll, items.len(), inner_height);
+
+    // The action banner / fetch error sits in the reserved bottom row.
+    if let Some((text, color)) = banner {
+        let banner_area = Rect {
+            x: inner.x,
+            y: inner.y + inner.height,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                text,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))),
+            banner_area,
+        );
+    }
 }
 
 /// Render the yes/no confirmation dialog (keyboard-driven: y / n / Esc).
@@ -1956,9 +2060,9 @@ fn render_confirm(frame: &mut Frame, app: &AppState, area: Rect) {
     push_file_section(&confirm.restore_files, "Restore", Color::Yellow);
     push_file_section(&confirm.delete_files, "Delete", Color::Red);
 
-    // Base height: borders + blank + message (+ danger warning) + blank + prompt. Add the
-    // file body plus a separating blank line when there are files to list.
-    let mut height = if confirm.danger { 7 } else { 6 };
+    // Base height: borders + blank + message (+ blank + danger warning) + blank + prompt. Add
+    // the file body plus a separating blank line when there are files to list.
+    let mut height = if confirm.danger { 8 } else { 6 };
     if has_files {
         height += detail_lines.len() as u16 + 1;
     }
@@ -1974,10 +2078,12 @@ fn render_confirm(frame: &mut Frame, app: &AppState, area: Rect) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .padding(panel_pad(app))
         .border_style(Style::default().fg(border_color))
         .title(title);
     let inner = block.inner(modal);
+    cast_shadow(frame, modal);
     frame.render_widget(Clear, modal);
     frame.render_widget(block, modal);
     let mut lines = vec![
@@ -1992,6 +2098,7 @@ fn render_confirm(frame: &mut Frame, app: &AppState, area: Rect) {
         lines.append(&mut detail_lines);
     }
     if confirm.danger {
+        lines.push(Line::from(String::new()));
         lines.push(Line::from(Span::styled(
             format!("  {} This cannot be undone.", icons.warning),
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1999,7 +2106,7 @@ fn render_confirm(frame: &mut Frame, app: &AppState, area: Rect) {
     }
     lines.push(Line::from(String::new()));
     lines.push(Line::from(Span::styled(
-        "  [y] yes     [n] no",
+        "  [y/enter] yes     [n] no",
         Style::default().fg(Color::DarkGray),
     )));
     frame.render_widget(Paragraph::new(lines), inner);
@@ -2063,10 +2170,12 @@ fn render_settings(frame: &mut Frame, app: &AppState, area: Rect) {
     let modal = centered_rect(width, height, area);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .padding(panel_pad(app))
         .border_style(Style::default().fg(Color::Cyan))
         .title(" Settings ");
     let inner = block.inner(modal);
+    cast_shadow(frame, modal);
     frame.render_widget(Clear, modal);
     frame.render_widget(block, modal);
     // Drop the leading blank line if padding already provides the top gap.
