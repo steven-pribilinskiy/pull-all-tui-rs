@@ -680,21 +680,23 @@ impl Contrast {
 }
 
 /// Background tone for the active palette, independent of `Contrast`. `Soft` uses a gentler
-/// surface (background / selection / shadow) without touching the text or accent saturation.
+/// surface; `Terminal` paints no base background, letting the terminal's own background show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Background {
     #[default]
     Normal,
     Soft,
+    Terminal,
 }
 
 impl Background {
-    /// Toggle Normal ↔ Soft.
+    /// Cycle Normal → Soft → Terminal → Normal.
     pub fn cycle(self) -> Self {
         match self {
             Background::Normal => Background::Soft,
-            Background::Soft => Background::Normal,
+            Background::Soft => Background::Terminal,
+            Background::Terminal => Background::Normal,
         }
     }
 }
@@ -747,7 +749,8 @@ pub static UNICODE_ICONS: IconSet = IconSet {
     ok: "✓",
     dirty: "•",
     branches: "⑂",
-    worktrees: "⑂",
+    // Distinct from `branches` (inverted fork) — same OCR block so it renders at the same width.
+    worktrees: "⑃",
     stashes: "≡",
     ahead: "↑",
     behind: "↓",
@@ -778,8 +781,11 @@ pub static EMOJI_ICONS: IconSet = IconSet {
     ahead: "↑",
     behind: "↓",
     warning: "🛑",
-    skip_log: "🚫",
-    retry_log: "🔄",
+    // Log markers stay Unicode even in emoji mode: the marker is baked into the stored log line
+    // at write time, so always using the clean Unicode glyph keeps logs consistent regardless of
+    // the active icon style (or a style change after the line was written).
+    skip_log: "⊘",
+    retry_log: "↻",
 };
 
 /// A mouse-clickable command region in the status bar (rebuilt each render).
@@ -1530,6 +1536,8 @@ pub struct AppState {
     pub show_build_info: bool,
     /// The build-info modal's `[x]` close button region.
     pub build_info_close_click: Option<(u16, u16, u16)>,
+    /// The build-info modal's `[restart]` button region (exec-restarts the binary).
+    pub build_info_reload_click: Option<(u16, u16, u16)>,
     // Grouping (`z`, groups from ~/.config/pull-all/groups.json):
     /// Render the list grouped (`z` toggles; persisted). Inert while `groups` is empty.
     pub grouping_enabled: bool,
@@ -1673,6 +1681,7 @@ impl AppState {
                 .unwrap_or_else(|_| "pull-all".to_string()),
             show_build_info: false,
             build_info_close_click: None,
+            build_info_reload_click: None,
             grouping_enabled: persisted.grouping_enabled,
             groups: Vec::new(),
             repo_group_map: Vec::new(),
@@ -2150,6 +2159,7 @@ impl AppState {
             (4, 2) => self.theme = Theme::Light,
             (5, 0) => self.background = Background::Normal,
             (5, 1) => self.background = Background::Soft,
+            (5, 2) => self.background = Background::Terminal,
             (6, 0) => self.contrast = Contrast::Normal,
             (6, 1) => self.contrast = Contrast::Soft,
             _ => return,

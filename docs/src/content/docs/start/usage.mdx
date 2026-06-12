@@ -88,10 +88,14 @@ background, contrast):
   accent color) so the app looks identical in any terminal. `auto` detects whether the
   terminal background is dark or light at startup (OSC 11 query, then `COLORFGBG`, then the
   Windows light/dark setting under WSL, then the macOS appearance setting) and applies the
-  matching palette.
-- **Background** and **Contrast** — two independent `normal` / `soft` axes. Background softens
-  the surface tones (background, selection, shadow); Contrast narrows the text/background
-  distance and desaturates the accent + semantic colors. They compose freely.
+  matching palette. Under `auto`, pull-all also **re-detects at runtime** (via the tty-safe
+  sources — `COLORFGBG` / the WSL registry / macOS appearance), so toggling your OS between
+  light and dark re-themes the running app within a couple of seconds, no restart needed.
+- **Background** — `normal` / `soft` / `terminal`. `normal` and `soft` paint a surface tone;
+  `terminal` paints **no** base background, letting your terminal's own background show through
+  (selected rows and modal shadows still get a tone so they stay visible).
+- **Contrast** — `normal` / `soft`. Independent of Background: it narrows the text/background
+  distance and desaturates the accent + semantic colors. The two axes compose freely.
 - **Grouping** — render the list as named [group sections](../../guides/groups/) (same as `z`).
 
 The modal is fully mouse-driven too: click a row label to select it, click a radio chip to set
@@ -110,7 +114,8 @@ click away.
 
 Clicking the `built … ago` tag in the status bar opens a **Build info** modal showing the
 running version, the watched executable path, when it was built, how the watch works, and
-whether a newer build is waiting. Any key or click closes it.
+whether a newer build is waiting. A `[restart]` button (or `r`) exec-restarts into the latest
+build; any other key or click closes it.
 
 ## Reading the result
 

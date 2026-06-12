@@ -173,12 +173,14 @@ fn base(dark: bool, soft: bool) -> &'static Palette {
 
 /// Compose a palette from two independent axes: `Background` picks the surface tones
 /// (`bg`/`selection_bg`/`shadow`), `Contrast` picks the text + accent + semantic colors.
-/// When both axes agree this reproduces one of the four static palettes exactly.
+/// When both axes agree this reproduces one of the four static palettes exactly. `Terminal`
+/// leaves `bg` as `Color::Reset` so the terminal's own background shows through (the row-selection
+/// and modal-shadow surfaces still get a tone, from the normal base, so they stay visible).
 pub fn palette(dark: bool, background: Background, contrast: Contrast) -> Palette {
     let bg_src = base(dark, background == Background::Soft);
     let fg_src = base(dark, contrast == Contrast::Soft);
     Palette {
-        bg: bg_src.bg,
+        bg: if background == Background::Terminal { Color::Reset } else { bg_src.bg },
         selection_bg: bg_src.selection_bg,
         shadow: bg_src.shadow,
         ..*fg_src
@@ -206,6 +208,21 @@ pub fn detect_dark_background() -> bool {
         return dark;
     }
     true
+}
+
+/// Re-detect dark/light at RUNTIME using only the tty-safe sources — `COLORFGBG`, the WSL
+/// Windows light/dark registry value, and the macOS appearance — skipping the OSC 11 query
+/// (which manages raw mode + reads the tty, so it can't run while the event loop owns stdin).
+/// Returns `None` when none apply (terminal reports its background only via OSC). Lets the Auto
+/// theme follow an OS light↔dark switch live, without restarting. Cheap; safe to poll.
+pub fn detect_dark_background_runtime() -> Option<bool> {
+    if let Some(dark) = std::env::var("COLORFGBG").ok().and_then(|raw| colorfgbg_dark(&raw)) {
+        return Some(dark);
+    }
+    if let Some(dark) = wsl_windows_dark() {
+        return Some(dark);
+    }
+    macos_dark()
 }
 
 /// Parse a `COLORFGBG` value ("15;0" or "15;default;0") — the last segment is the background

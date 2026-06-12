@@ -592,7 +592,7 @@ fn render_list(frame: &mut Frame, app: &mut AppState, area: Rect, tick: u64) -> 
                 };
                 spans.push(Span::styled(
                     format!(" {}", pad_display(&text, dirty_w)),
-                    flash_style(Style::default().fg(Color::Red), flash.dirty),
+                    flash_style(Style::default().fg(Color::Yellow), flash.dirty),
                 ));
             }
             if columns.last_commit {
@@ -958,27 +958,29 @@ fn status_tail_for(
             _ => {}
         }
     }
+    // A space between glyph and count so ambiguous-width glyphs (e.g. `⊘`) don't collide with the
+    // number next to them.
     let mut tail: Vec<Span> = Vec::new();
     if running > 0 {
         tail.push(Span::styled(
-            format!(" {}{running}", spinner_frame(tick, icons)),
+            format!(" {} {running}", spinner_frame(tick, icons)),
             Style::default().fg(Color::Yellow),
         ));
     }
     if updated > 0 {
-        tail.push(Span::styled(format!(" {}{updated}", icons.updated), Style::default().fg(Color::Green)));
+        tail.push(Span::styled(format!(" {} {updated}", icons.updated), Style::default().fg(Color::Green)));
     }
     if throttled > 0 {
         tail.push(Span::styled(
-            format!(" {}{throttled}", icons.throttled),
+            format!(" {} {throttled}", icons.throttled),
             Style::default().fg(Color::Magenta),
         ));
     }
     if failed > 0 {
-        tail.push(Span::styled(format!(" {}{failed}", icons.failed), Style::default().fg(Color::Red)));
+        tail.push(Span::styled(format!(" {} {failed}", icons.failed), Style::default().fg(Color::Red)));
     }
     if skipped > 0 {
-        tail.push(Span::styled(format!(" {}{skipped}", icons.skipped), Style::default().fg(Color::DarkGray)));
+        tail.push(Span::styled(format!(" {} {skipped}", icons.skipped), Style::default().fg(Color::DarkGray)));
     }
     tail.push(Span::styled(format!(" ({total})"), Style::default().fg(Color::DarkGray)));
     tail
@@ -1246,6 +1248,47 @@ fn wrap_chars(text: &str, width: usize) -> Vec<String> {
     chunks
 }
 
+/// Wrap a link / URL across `width`-wide lines, preferring to break right AFTER a separator
+/// (`/ - . : _ @`) so it splits at natural boundaries; falls back to a hard char break when no
+/// separator fits on the line. Each returned segment is ≤ `width` display columns.
+fn wrap_link(text: &str, width: usize) -> Vec<String> {
+    const SEPS: [char; 6] = ['/', '-', '.', ':', '_', '@'];
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut lines: Vec<String> = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        // Greedily find how many chars fit in `width` display columns from `start`.
+        let mut end = start;
+        let mut used = 0;
+        while end < chars.len() {
+            let char_width = unicode_width::UnicodeWidthChar::width(chars[end]).unwrap_or(1);
+            if used + char_width > width {
+                break;
+            }
+            used += char_width;
+            end += 1;
+        }
+        if end >= chars.len() {
+            lines.push(chars[start..].iter().collect());
+            break;
+        }
+        // Prefer to break right after the last separator that fits — keeps it at the line's end.
+        let brk = (start + 1..end)
+            .rev()
+            .find(|&index| SEPS.contains(&chars[index]))
+            .map_or(end, |index| index + 1);
+        lines.push(chars[start..brk].iter().collect());
+        start = brk;
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// The info block's wrapped display lines plus the clickable regions inside them
 /// (`(line_index, start_col, end_col, action)`, columns relative to the inner content origin).
 type InfoClick = (usize, u16, u16, InfoAction);
@@ -1274,6 +1317,23 @@ fn build_info_lines(
         ])
     };
 
+    // A clickable link field that WRAPS (rather than truncates) — Branch and Remote, where the
+    // whole value is worth seeing. Each wrapped segment is its own clickable region (same URL),
+    // continuations indent to the value column.
+    let push_link = |lines: &mut Vec<Line<'static>>, clicks: &mut Vec<InfoClick>, name: &str, text: &str, url: &str| {
+        for (index, segment) in wrap_link(text, value_width).into_iter().enumerate() {
+            let line_idx = lines.len();
+            let width = UnicodeWidthStr::width(segment.as_str()) as u16;
+            clicks.push((line_idx, LABEL_W as u16, LABEL_W as u16 + width, InfoAction::OpenUrl(url.to_string())));
+            let label_span = if index == 0 {
+                Span::styled(format!("{name:<13}"), label)
+            } else {
+                Span::raw(format!("{:<13}", ""))
+            };
+            lines.push(Line::from(vec![label_span, Span::styled(segment, link)]));
+        }
+    };
+
     // Status — spell out what the duration means (how long the pull/fetch took).
     let status_value = match state.elapsed {
         Some(elapsed) => {
@@ -1291,14 +1351,7 @@ fn build_info_lines(
         .and_then(web_remote)
         .map(|base| format!("{base}/tree/{branch}"));
     match branch_link {
-        Some(url) => {
-            let width = UnicodeWidthStr::width(branch.as_str()) as u16;
-            clicks.push((lines.len(), LABEL_W as u16, LABEL_W as u16 + width, InfoAction::OpenUrl(url)));
-            lines.push(Line::from(vec![
-                Span::styled(format!("{:<13}", "Branch"), label),
-                Span::styled(branch, link),
-            ]));
-        }
+        Some(url) => push_link(&mut lines, &mut clicks, "Branch", &branch, &url),
         None => lines.push(plain("Branch", branch)),
     }
 
@@ -1379,12 +1432,7 @@ fn build_info_lines(
     }
 
     if let Some(url) = &state.remote_url {
-        let width = UnicodeWidthStr::width(url.as_str()) as u16;
-        clicks.push((lines.len(), LABEL_W as u16, LABEL_W as u16 + width, InfoAction::OpenUrl(url.clone())));
-        lines.push(Line::from(vec![
-            Span::styled(format!("{:<13}", "Remote"), label),
-            Span::styled(url.clone(), link),
-        ]));
+        push_link(&mut lines, &mut clicks, "Remote", url, url);
     }
 
     // Worktrees — hidden when there are none.
@@ -1398,46 +1446,47 @@ fn build_info_lines(
         lines.push(plain("Worktrees", worktrees.join(", ")));
     }
 
-    // Path — a `⧉` copy button next to the label, the value left-truncated (click to expand +
-    // wrap from the value column). Keeps the filename tail visible.
+    // Path — value left-truncated (keeps the filename tail), click to expand + wrap. A trailing
+    // `⧉` copy button sits AFTER the value so the value column stays aligned with the other rows.
     let path = state.path.display().to_string();
-    let copy_col = (LABEL_W - 2) as u16;
-    let label_with_copy = |line_idx: usize, clicks: &mut Vec<InfoClick>| -> Vec<Span<'static>> {
-        clicks.push((line_idx, copy_col, copy_col + 1, InfoAction::CopyText(path.clone())));
-        vec![
-            Span::styled("Path".to_string(), label),
-            Span::raw(" ".repeat(copy_col as usize - 4)),
-            Span::styled("⧉".to_string(), link),
-            Span::raw(" "),
-        ]
-    };
     let path_expanded = app.info_expanded.contains("Path");
     let path_overflows = UnicodeWidthStr::width(path.as_str()) > value_width;
-    if path_expanded && path_overflows {
-        for (index, chunk) in wrap_chars(&path, value_width).into_iter().enumerate() {
+    // Reserve 2 cols on lines that carry the copy button (` ⧉`).
+    let copy_avail = value_width.saturating_sub(2).max(1);
+    let push_path_line =
+        |lines: &mut Vec<Line<'static>>, clicks: &mut Vec<InfoClick>, first: bool, text: String, with_copy: bool| {
             let line_idx = lines.len();
-            let width = UnicodeWidthStr::width(chunk.as_str()) as u16;
-            clicks.push((line_idx, LABEL_W as u16, LABEL_W as u16 + width, InfoAction::ToggleExpand("Path".into())));
-            let mut spans = if index == 0 {
-                label_with_copy(line_idx, &mut clicks)
+            let value_w = UnicodeWidthStr::width(text.as_str()) as u16;
+            if path_overflows {
+                clicks.push((line_idx, LABEL_W as u16, LABEL_W as u16 + value_w, InfoAction::ToggleExpand("Path".into())));
+            }
+            let label_span = if first {
+                Span::styled(format!("{:<13}", "Path"), label)
             } else {
-                vec![Span::raw(format!("{:<13}", ""))]
+                Span::raw(format!("{:<13}", ""))
             };
-            spans.push(Span::styled(chunk, value));
+            let value_style = if path_overflows && !path_expanded {
+                value.add_modifier(Modifier::UNDERLINED)
+            } else {
+                value
+            };
+            let mut spans = vec![label_span, Span::styled(text, value_style)];
+            if with_copy {
+                let copy_col = LABEL_W as u16 + value_w + 1;
+                clicks.push((line_idx, copy_col, copy_col + 1, InfoAction::CopyText(path.clone())));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("⧉".to_string(), link));
+            }
             lines.push(Line::from(spans));
+        };
+    if !path_overflows {
+        push_path_line(&mut lines, &mut clicks, true, path.clone(), true);
+    } else if path_expanded {
+        for (index, chunk) in wrap_chars(&path, copy_avail).into_iter().enumerate() {
+            push_path_line(&mut lines, &mut clicks, index == 0, chunk, index == 0);
         }
     } else {
-        let line_idx = lines.len();
-        let mut spans = label_with_copy(line_idx, &mut clicks);
-        if path_overflows {
-            let shown = truncate_left(&path, value_width);
-            let width = UnicodeWidthStr::width(shown.as_str()) as u16;
-            clicks.push((line_idx, LABEL_W as u16, LABEL_W as u16 + width, InfoAction::ToggleExpand("Path".into())));
-            spans.push(Span::styled(shown, value.add_modifier(Modifier::UNDERLINED)));
-        } else {
-            spans.push(Span::styled(path.clone(), value));
-        }
-        lines.push(Line::from(spans));
+        push_path_line(&mut lines, &mut clicks, true, truncate_left(&path, copy_avail), true);
     }
 
     (lines, clicks)
@@ -3436,7 +3485,7 @@ fn render_repo_page(frame: &mut Frame, app: &mut AppState, area: Rect, tick: u64
             spans.extend(ahead_behind_spans(ahead, behind, 10, icons));
         }
         if columns.dirty {
-            spans.push(count_cell(icons.dirty, Some(dirty_count), count_w, Color::Red));
+            spans.push(count_cell(icons.dirty, Some(dirty_count), count_w, Color::Yellow));
         }
         if columns.added {
             spans.push(count_cell("+", stats.map(|stat| stat.added), count_w, Color::Green));
@@ -3820,6 +3869,11 @@ fn render_build_info(frame: &mut Frame, app: &mut AppState, area: Rect) {
     let height = (lines.len() as u16 + 4 + pad).min(area.height.saturating_sub(2).max(8));
     let modal = centered_rect(width, height, area);
     let (close_line, close_click) = modal_close_button(modal);
+    // A `[restart]` button on the bottom border (exec-restarts the binary, same as the reload notice).
+    let restart = " [restart] ";
+    let restart_row = modal.y + modal.height.saturating_sub(1);
+    let restart_start = modal.x + 1;
+    let restart_end = restart_start + UnicodeWidthStr::width(restart) as u16;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -3827,12 +3881,20 @@ fn render_build_info(frame: &mut Frame, app: &mut AppState, area: Rect) {
         .border_style(Style::default().fg(Color::Cyan))
         .title(" Build info ")
         .title_top(close_line)
-        .title_bottom(Line::from(" esc / click closes ").right_aligned());
+        .title_bottom(
+            Line::from(Span::styled(
+                restart,
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ))
+            .left_aligned(),
+        )
+        .title_bottom(Line::from(" r restart · esc closes ").right_aligned());
     let inner = block.inner(modal);
     cast_shadow(frame, modal);
     frame.render_widget(Clear, modal);
     frame.render_widget(block, modal);
     app.build_info_close_click = close_click;
+    app.build_info_reload_click = Some((restart_row, restart_start, restart_end));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
@@ -3988,6 +4050,7 @@ fn render_settings(frame: &mut Frame, app: &mut AppState, area: Rect) {
                     vec![
                         ("normal", app.background == Background::Normal),
                         ("soft", app.background == Background::Soft),
+                        ("terminal", app.background == Background::Terminal),
                     ],
                 ),
                 (

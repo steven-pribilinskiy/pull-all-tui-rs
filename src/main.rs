@@ -153,6 +153,26 @@ async fn watch_for_new_build(app_state: Arc<Mutex<AppState>>) {
     }
 }
 
+/// For the Auto theme, re-detect dark/light from the tty-safe sources every few seconds so an OS
+/// light↔dark switch re-themes live (the render loop redraws every tick). Detection runs on a
+/// blocking thread (it may shell out to `reg.exe`/`defaults`); the `AppState` lock is held only
+/// to read `theme` and write `auto_dark`, never across `.await`.
+async fn watch_theme(app_state: Arc<Mutex<AppState>>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(3));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        if app_state.lock().unwrap().theme != app::Theme::Auto {
+            continue;
+        }
+        if let Ok(Some(dark)) =
+            tokio::task::spawn_blocking(theme::detect_dark_background_runtime).await
+        {
+            app_state.lock().unwrap().auto_dark = dark;
+        }
+    }
+}
+
 /// If invoked as `pull-all go|bun|cli [args]`, replace this process with the matching
 /// sibling implementation and forward the remaining args. Returns for every other
 /// invocation so the default Rust TUI runs.
@@ -641,6 +661,7 @@ async fn run_tui(
 
     // Watch the binary on disk for a newer build (drives the reload notice).
     tokio::spawn(watch_for_new_build(Arc::clone(&app_state)));
+    tokio::spawn(watch_theme(Arc::clone(&app_state)));
 
     let exit_code = run_event_loop(&mut terminal, Arc::clone(&app_state)).await?;
 
@@ -906,9 +927,13 @@ async fn run_event_loop(
                     }
                 }
 
-                // Build-info modal: informational — any click dismisses it (and is swallowed).
+                // Build-info modal: `[restart]` exec-restarts; any other click dismisses it.
                 if app.show_build_info {
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                        if region_hit(app.build_info_reload_click, mouse.column, mouse.row) {
+                            drop(app);
+                            return Ok(RELOAD_EXIT);
+                        }
                         app.show_build_info = false;
                     }
                     continue;
@@ -1299,13 +1324,17 @@ async fn run_event_loop(
                     continue;
                 }
 
-                // Build-info modal: informational — Ctrl-C quits, any other key dismisses it.
+                // Build-info modal: Ctrl-C quits, `r` exec-restarts, any other key dismisses it.
                 if app.show_build_info {
                     if key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         drop(app);
                         return Ok(130);
+                    }
+                    if key.code == KeyCode::Char('r') {
+                        drop(app);
+                        return Ok(RELOAD_EXIT);
                     }
                     app.show_build_info = false;
                     continue;

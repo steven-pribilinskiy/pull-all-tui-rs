@@ -18,14 +18,15 @@ Press `t` to enter the column-toggle leader, then a column key. The mode stays a
 | Key | Column | Glyph |
 |-----|--------|-------|
 | `a` | Ahead / behind vs upstream | `↑N ↓N` |
-| `d` | Dirty (uncommitted file count) | `•N` |
+| `d` | Dirty (uncommitted file count) | `•N` (amber) |
 | `l` | Last-commit age | relative date |
-| `w` | Worktree count | `⑂N` (cyan) |
+| `w` | Worktree count | `⑃N` (cyan) |
 | `b` | Feature-branch count (local branches excluding `main`/`dev`) | `⑂N` (green) |
 | `s` | Stash count | `≡N` |
 
-Enabled columns persist across runs. Count columns render a **dim zero** (`⑂0`, `≡0`) rather
-than a blank, so the column stays recognizable. A column every repo leaves empty (no
+Enabled columns persist across runs. Count columns render a **dim zero** (`⑃0`, `≡0`) rather
+than a blank, so the column stays recognizable. The dirty marker is **amber**, not red —
+uncommitted changes are a "modified" state, not an error (red stays for genuine failures). A column every repo leaves empty (no
 worktrees, no stashes, or `≤1` branch everywhere) auto-hides once its data has loaded, and its
 `t`-menu chip goes dim and inert until some repo has a value.
 
@@ -50,9 +51,9 @@ The list is always sorted — **Name ascending** is the default.
 Re-picking the same column (or re-clicking its header) flips the direction. The sort
 persists across runs.
 
-:::note[Worktrees and branches share a glyph]
-Both the worktree (`w`) and branch (`b`) columns render `⑂N`; they're distinguished only
-by color — cyan for worktrees, green for branches.
+:::note[Worktree vs branch glyph]
+Worktrees render `⑃N` (cyan) and branches `⑂N` (green) — distinguished by both the glyph
+(inverted vs upright fork) and the color.
 :::
 
 ## Lazy loading

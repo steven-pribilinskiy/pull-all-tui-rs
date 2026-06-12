@@ -27,7 +27,7 @@ Interactive multi-repo git pull dashboard. Pulls every git repo in a directory i
 - Diff modal with a clickable file list over the selected file's diff (stash, uncommitted, vs base branch, or **a branch's changes vs its base**); `Tab` switches focus between the file list and diff, with a footer that adapts to the focused pane; **status-filter chips** (`f` / click) with count badges when a change set has >10 files across ≥2 statuses; `Shift`/`Alt`+`PgUp`/`PgDn` page the file list; "no changes" shows a toast instead of an empty modal
 - Draggable scrollbars everywhere (preview, diff panels, help, repo page), highlighted while dragged
 - Tabbed, **context-aware** help modal (`?`): **Hotkeys** (for the current view) · **CLI & Flags** · **Legend** (every glyph, both icon sets) · **About**, switched with `Tab`/click (last tab remembered)
-- Settings modal (`,`): panel padding, Unicode ⇄ emoji icons, a **theme** (auto-detected / dark / light), and independent **background** (normal / soft) and **contrast** (normal / soft) levels — all persisted; rows and radio chips are mouse-clickable
+- Settings modal (`,`): panel padding, Unicode ⇄ emoji icons, a **theme** (auto-detected / dark / light), independent **background** (normal / soft / **terminal** — use the terminal's own background) and **contrast** (normal / soft) levels — all persisted; rows and radio chips are mouse-clickable. The `auto` theme **re-detects** dark/light at runtime, so an OS light↔dark switch re-themes live (no restart)
 - Web-like mouse support everywhere: full status-bar hints + active `⟪sort⟫`/`[filter]` tags clickable, every modal gets an `[x]` and closes on outside click, repo page has an `[esc back]` button
 - **New-build reload notice**: detects a newer binary installed over the running one and offers a one-click `[reload]` (exec-restart in the same terminal)
 - Non-TUI fallback (same output as bash reference) when not on a TTY or with `--no-tui`
@@ -140,7 +140,7 @@ Opens a full-screen page for the selected repo that runs `git fetch` and lists e
 
 ### Columns (`t` leader)
 
-The list always shows the status glyph + name + branch + a dirty marker (`•` for any repo with uncommitted changes). Press `t` then a column key to toggle extra columns: `a` ahead/behind, `d` adds the dirty **count** (`•N`) to the always-on marker, `l` last-commit age, `w` worktree count (`⑂N`, cyan), `b` feature-branch count (`⑂N`, green — local branches excluding `main`/`dev`), `s` stash count (`≡N`). Count columns render a **dim zero** rather than a blank, so the column shape stays recognizable. A column every repo leaves empty (no worktrees, no stashes, or ≤1 branch everywhere) auto-hides once its data has loaded, and its `t`-menu chip goes dim and inert. The git-derived columns fetch per-repo details in the background the first time one is enabled (cells show `…` until ready); `w` is free from worktree discovery. Enabled columns persist across runs.
+The list always shows the status glyph + name + branch + a dirty marker (an amber `•` for any repo with uncommitted changes — amber, not red, since it's a "modified" state, not an error). Press `t` then a column key to toggle extra columns: `a` ahead/behind, `d` adds the dirty **count** (`•N`) to the always-on marker, `l` last-commit age, `w` worktree count (`⑃N`, cyan), `b` feature-branch count (`⑂N`, green — local branches excluding `main`/`dev`), `s` stash count (`≡N`). Count columns render a **dim zero** rather than a blank, so the column shape stays recognizable. A column every repo leaves empty (no worktrees, no stashes, or ≤1 branch everywhere) auto-hides once its data has loaded, and its `t`-menu chip goes dim and inert. The git-derived columns fetch per-repo details in the background the first time one is enabled (cells show `…` until ready); `w` is free from worktree discovery. Enabled columns persist across runs.
 
 ### Info panel (`i`)
 
@@ -230,7 +230,7 @@ Everything actionable is clickable like a web page:
 
 While running, pull-all watches its own binary on disk. When a newer build is installed (e.g. `make install`'s atomic rename), a persistent notice appears in the top-right (inset with the panel-padding setting, with a glint sweeping its border): `↺ new build installed · [reload] [x]`. It rides on top of every screen — the repo list, the full-screen repo page, and any open modal — so it's never hidden. `[reload]` restores the terminal and `exec`s the new binary with the same arguments — the fresh process re-scans and re-pulls (instant when everything is already up to date). `[x]` dismisses the notice; it re-arms if the binary changes again.
 
-Clicking the **`built … ago`** tag in the status bar opens a **Build info** modal: the running version, the watched executable path, when it was built, how the new-build watch works, and whether a newer build is currently waiting. Any key or click closes it.
+Clicking the **`built … ago`** tag in the status bar opens a **Build info** modal: the running version, the watched executable path, when it was built, how the new-build watch works, and whether a newer build is currently waiting. A `[restart]` button (or `r`) exec-restarts into the latest build; any other key or click closes it.
 
 ## Testing
 
