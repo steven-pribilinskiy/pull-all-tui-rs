@@ -4295,7 +4295,9 @@ fn render_settings(frame: &mut Frame, app: &mut AppState, area: Rect) {
         + (sections.len() - 1)
         + hint_rows
         + 2;
-    let width = 48u16.min(area.width.saturating_sub(2)).max(20) + pad;
+    // Label column width — fits the longest setting label ("Auto-pull on launch" = 19).
+    const LABEL_W: u16 = 20;
+    let width = 54u16.min(area.width.saturating_sub(2)).max(20) + pad;
     let height = (content_rows as u16 + 2 + pad).min(area.height.saturating_sub(2).max(6));
     let modal = centered_rect(width, height, area);
     let (close_line, close_click) = modal_close_button(modal);
@@ -4338,13 +4340,13 @@ fn render_settings(frame: &mut Frame, app: &mut AppState, area: Rect) {
             };
             let mut spans = vec![
                 Span::styled(format!("  {cursor}"), label_style),
-                Span::styled(format!("{label:<14}"), label_style),
+                Span::styled(format!("{label:<width$}", width = LABEL_W as usize), label_style),
             ];
             let mut col = inner.x + 4;
             if in_view {
-                app.settings_click.push((row_y, col, col + 14, row_idx, None));
+                app.settings_click.push((row_y, col, col + LABEL_W, row_idx, None));
             }
-            col += 14;
+            col += LABEL_W;
             for (option_idx, (text, active)) in options.iter().enumerate() {
                 if option_idx > 0 {
                     spans.push(Span::raw("  "));
