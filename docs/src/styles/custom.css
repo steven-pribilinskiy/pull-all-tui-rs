@@ -273,9 +273,33 @@
   padding: 0.4rem;
   min-height: 6rem;
 }
-/* asciinema-player sits on the dark terminal surface. */
+/* asciinema-player chrome follows the page theme (the recorded cast colors already do), so the
+   player frame + controls are light in light mode and dark in dark mode. `!important` beats the
+   library's own theme rules. */
 .termcast .ap-player {
-  background: transparent;
+  background: var(--term-bg) !important;
+  color: var(--term-ink) !important;
+}
+.termcast .ap-control-bar {
+  color: var(--term-ink) !important;
+  background: color-mix(in srgb, var(--term-bg-bar) 92%, transparent) !important;
+}
+.termcast .ap-playback-button,
+.termcast .ap-timer,
+.termcast .ap-kbd-button,
+.termcast .ap-fullscreen-button {
+  color: var(--term-ink) !important;
+}
+.termcast .ap-gutter-empty {
+  background: color-mix(in srgb, var(--term-ink) 20%, transparent) !important;
+}
+.termcast .ap-gutter-full,
+.termcast .ap-seekable .ap-gutter-full {
+  background: var(--glyph-ok) !important;
+}
+.termcast .ap-tooltip {
+  background: var(--term-ink) !important;
+  color: var(--term-bg) !important;
 }
 .termcast__screen:empty::after {
   content: 'loading session…';
