@@ -69,6 +69,39 @@
   text-decoration-thickness: 1px;
 }
 
+/* Theme toggle button (replaces Starlight's native select). */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  color: var(--sl-color-gray-1);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease;
+}
+.theme-toggle:hover {
+  color: var(--sl-color-accent);
+  background: var(--sl-color-gray-7, var(--sl-color-bg-sidebar));
+}
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--sl-color-accent);
+  outline-offset: 2px;
+}
+.theme-toggle__moon {
+  display: none;
+}
+:root[data-theme='dark'] .theme-toggle__sun {
+  display: none;
+}
+:root[data-theme='dark'] .theme-toggle__moon {
+  display: inline;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;

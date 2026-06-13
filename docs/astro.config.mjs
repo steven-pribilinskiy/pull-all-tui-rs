@@ -28,6 +28,10 @@ export default defineConfig({
         },
       ],
       customCss: ['./src/styles/custom.css'],
+      // Replace the native <select> theme switcher with a sun/moon toggle button.
+      components: {
+        ThemeSelect: './src/components/ThemeToggle.astro',
+      },
       sidebar: [
         {
           label: 'Start here',
