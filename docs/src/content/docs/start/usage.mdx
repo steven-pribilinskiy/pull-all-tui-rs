@@ -145,7 +145,7 @@ When the run finishes, a **Result** summary row reports how many repos were upda
 already up to date, were skipped, had no upstream, or failed. The process
 [exit code](../../reference/exit-codes/) reflects the outcome so scripts can branch on it.
 
-A branch with no upstream configured is a distinct **no-upstream** state (glyph `⊝`), not a
+A branch with no upstream configured is a distinct **no-upstream** state (glyph `▽`), not a
 failure — it's kept off the Errors page and counts as done. A branch that tracks a remote ref
 which no longer exists (its PR was merged and the branch deleted, so git pull reports "no such
 ref was fetched") is treated the same way — nothing to pull, not a red failure.

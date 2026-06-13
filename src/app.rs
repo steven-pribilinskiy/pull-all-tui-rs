@@ -786,13 +786,16 @@ pub struct IconSet {
     pub retry_log: &'static str,
 }
 
+// Status glyphs are drawn from Geometric Shapes (U+25xx), which terminal fonts like Cascadia Code
+// cover at a true single cell. Earlier circled-operator glyphs (⊘ ⊝, Math Operators) were missing
+// from those fonts, so terminals substituted a double-width fallback and shifted the repo name.
 pub static UNICODE_ICONS: IconSet = IconSet {
     spinner: &["◐", "◓", "◑", "◒"],
     queued: "◯",
     up_to_date: "◌",
     updated: "✓",
-    no_upstream: "⊝",
-    skipped: "⊘",
+    no_upstream: "▽",
+    skipped: "◇",
     throttled: "↯",
     failed: "✗",
     ok: "✓",
@@ -806,7 +809,7 @@ pub static UNICODE_ICONS: IconSet = IconSet {
     ahead: "↑",
     behind: "↓",
     warning: "⚠",
-    skip_log: "⊘",
+    skip_log: "◇",
     retry_log: "↻",
 };
 

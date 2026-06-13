@@ -242,15 +242,19 @@ fn open_url(url: &str) {
 }
 
 /// Copy text to the system clipboard via the first available tool, writing to its stdin.
+/// `clip.exe` (Windows, reachable under WSL) is tried first and fed **UTF-16LE** — it otherwise
+/// mangles non-ASCII (e.g. `•` → `ΓÇó`) because it reads stdin as the OEM code page. The Unix
+/// tools take UTF-8.
 fn copy_to_clipboard(text: &str) {
     use std::io::Write;
-    let tools: [(&str, &[&str]); 4] = [
-        ("clip.exe", &[]),
-        ("wl-copy", &[]),
-        ("xclip", &["-selection", "clipboard"]),
-        ("pbcopy", &[]),
+    // (tool, args, encode_as_utf16le)
+    let tools: [(&str, &[&str], bool); 4] = [
+        ("clip.exe", &[], true),
+        ("wl-copy", &[], false),
+        ("xclip", &["-selection", "clipboard"], false),
+        ("pbcopy", &[], false),
     ];
-    for (tool, args) in tools {
+    for (tool, args, utf16le) in tools {
         let child = Command::new(tool)
             .args(args)
             .stdin(std::process::Stdio::piped())
@@ -259,7 +263,13 @@ fn copy_to_clipboard(text: &str) {
             .spawn();
         if let Ok(mut child) = child {
             if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
+                if utf16le {
+                    let bytes: Vec<u8> =
+                        text.encode_utf16().flat_map(|unit| unit.to_le_bytes()).collect();
+                    let _ = stdin.write_all(&bytes);
+                } else {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
             }
             let _ = child.wait();
             return;
