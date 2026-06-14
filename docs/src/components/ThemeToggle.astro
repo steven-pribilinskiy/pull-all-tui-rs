@@ -1,12 +1,13 @@
 ---
 /**
- * Overrides Starlight's native `<select>` theme switcher with a single icon button that
- * toggles light ↔ dark. Persists to the same `starlight-theme` localStorage key Starlight's
- * own provider reads, so it stays in sync across navigations.
+ * Overrides Starlight's native <select> theme switcher with a single button that cycles
+ * light → dark → system. "system" follows the OS `prefers-color-scheme` live. Persists to the
+ * same `starlight-theme` key Starlight's provider reads ('light' | 'dark' | 'auto'), so it stays
+ * in sync across navigations.
  */
 ---
 
-<button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle dark mode">
+<button type="button" class="theme-toggle" data-theme-toggle aria-label="Theme">
   <svg class="theme-toggle__sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <circle cx="12" cy="12" r="4"></circle>
     <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
@@ -14,27 +15,46 @@
   <svg class="theme-toggle__moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
   </svg>
+  <svg class="theme-toggle__auto" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="2" y="4" width="20" height="13" rx="2"></rect>
+    <path d="M8 21h8M12 17v4"></path>
+  </svg>
 </button>
 
 <script>
   const KEY = 'starlight-theme';
+  const MODES = ['light', 'dark', 'auto'] as const;
+  type Mode = (typeof MODES)[number];
 
-  const resolved = (): 'light' | 'dark' =>
-    document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+  const media = window.matchMedia('(prefers-color-scheme: dark)');
 
-  function apply(theme: 'light' | 'dark') {
-    document.documentElement.dataset.theme = theme;
+  const currentMode = (): Mode => {
+    const stored = localStorage.getItem(KEY);
+    return stored === 'light' || stored === 'dark' ? stored : 'auto';
+  };
+
+  function resolve(mode: Mode): 'light' | 'dark' {
+    if (mode === 'auto') return media.matches ? 'dark' : 'light';
+    return mode;
+  }
+
+  function apply(mode: Mode) {
     try {
-      localStorage.setItem(KEY, theme);
+      localStorage.setItem(KEY, mode);
     } catch {}
+    document.documentElement.dataset.theme = resolve(mode);
     sync();
   }
 
   function sync() {
-    const isDark = resolved() === 'dark';
+    const mode = currentMode();
+    const label =
+      mode === 'auto' ? 'Theme: system (click for light)'
+      : mode === 'light' ? 'Theme: light (click for dark)'
+      : 'Theme: dark (click for system)';
     document.querySelectorAll<HTMLButtonElement>('[data-theme-toggle]').forEach((btn) => {
-      btn.setAttribute('aria-pressed', String(isDark));
-      btn.setAttribute('aria-label', isDark ? 'Switch to light theme' : 'Switch to dark theme');
+      btn.dataset.mode = mode;
+      btn.setAttribute('aria-label', label);
     });
   }
 
@@ -43,9 +63,17 @@
     document.querySelectorAll<HTMLButtonElement>('[data-theme-toggle]').forEach((btn) => {
       if (btn.dataset.bound) return;
       btn.dataset.bound = 'true';
-      btn.addEventListener('click', () => apply(resolved() === 'dark' ? 'light' : 'dark'));
+      btn.addEventListener('click', () => {
+        const next = MODES[(MODES.indexOf(currentMode()) + 1) % MODES.length];
+        apply(next);
+      });
     });
   }
+
+  // Re-resolve when the OS preference flips, but only while in "system" mode.
+  media.addEventListener('change', () => {
+    if (currentMode() === 'auto') apply('auto');
+  });
 
   init();
   document.addEventListener('astro:page-load', init);
