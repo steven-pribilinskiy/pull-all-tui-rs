@@ -525,7 +525,12 @@
 }
 .termcast__screen {
   padding: 0.4rem;
-  min-height: 6rem;
+  /* Reserve the player's rendered height up front: the 100×28 cast under asciinema's
+     fit:'width' renders at a fixed width/height ratio (font scales with width, so the ratio
+     is viewport-independent). Without this the box mounts from a short loading state and grows
+     ~3x when the player attaches, and the centered hero grid re-centers the left text downward
+     (a two-stage vertical shift on load). Measured border-box ratio at the hero width: 582×403. */
+  aspect-ratio: 582 / 403;
 }
 /* asciinema-player chrome follows the page theme (the recorded cast colors already do), so the
    player frame + controls are light in light mode and dark in dark mode. `!important` beats the
