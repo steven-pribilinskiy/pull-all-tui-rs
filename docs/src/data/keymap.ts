@@ -1,5 +1,7 @@
-// Single source of truth for the keybinding table (the in-page explorer renders from this).
-// Keep it in sync with src/main.rs when bindings change.
+// The keybinding data lives in keymap.json — the single source shared by the docs (this file +
+// the in-page explorer + the keyboard viewer) AND the Rust TUI (which `include_str!`s the same
+// file for its in-terminal keyboard viewer). Edit keymap.json; keep it in sync with src/main.rs.
+import keymapData from './keymap.json';
 
 export type Binding = {
   /** Keys that trigger the action, rendered as <kbd>. Alternatives in one entry. */
@@ -18,94 +20,4 @@ export type KeymapSection = {
   bindings: Binding[];
 };
 
-export const keymap: KeymapSection[] = [
-  {
-    id: 'list',
-    title: 'Repo list',
-    blurb: 'The main two-pane dashboard: repos on the left, live log/diff on the right.',
-    bindings: [
-      { keys: ['j', '↓'], action: 'Next repo' },
-      { keys: ['k', '↑'], action: 'Previous repo' },
-      { keys: ['g'], action: 'Jump to top' },
-      { keys: ['G'], action: 'Jump to bottom', note: 'the Result summary row' },
-      { keys: ['Space'], action: 'Toggle the Result/Errors summary in the preview', note: 'any navigation clears it; on a folder/group header: collapse/expand' },
-      { keys: ['v', 'g'], action: 'Toggle the grouped list view', note: 'groups from ~/.config/polygit/groups.json; persisted', keywords: ['group', 'grouping', 'view', 'section'] },
-      { keys: ['v', 't'], action: 'Toggle the directory-tree view', note: 'folders from recursive discovery; persisted; inert when every repo is at the scan root', keywords: ['tree', 'folder', 'directory', 'view', 'nested'] },
-      { keys: ['z', 'a'], action: 'Fold leader: toggle the selected folder/group', note: 'za toggle · zo/zc open/close · zO expand subtree · zM collapse all · zR expand all', keywords: ['fold', 'collapse', 'expand', 'vim'] },
-      { keys: ['-'], action: 'Collapse all folders and groups', keywords: ['fold', 'collapse all'] },
-      { keys: ['+', '='], action: 'Expand all folders and groups', keywords: ['fold', 'expand all'] },
-      { keys: ['*'], action: 'Expand the selected subtree recursively', keywords: ['fold', 'expand', 'subtree'] },
-      { keys: ['←'], action: 'Collapse the selected header, or jump to the enclosing folder/group', note: 'tree-style', keywords: ['collapse', 'fold', 'parent', 'left'] },
-      { keys: ['→'], action: 'Expand a collapsed folder/group (on its header)', keywords: ['expand', 'unfold', 'right'] },
-      { keys: ['Z'], action: 'Refresh dynamic group memberships', note: 'command/url sources; re-resolves now, bypassing the cache TTL', keywords: ['group', 'refresh', 'resolve'] },
-      { keys: ['Tab'], action: 'Toggle focus: list [1] ↔ preview [2]', note: 'the active pane gets a bright rounded border' },
-      { keys: ['1', '2'], action: 'Focus the list / preview pane directly', keywords: ['panel', 'pane', 'focus'] },
-      { keys: ['PgUp', 'PgDn'], action: 'Scroll the preview', note: 'when focused' },
-      { keys: ['End'], action: 'Resume auto-scroll in the preview' },
-      { keys: ['[', ']'], action: 'Narrow / widen the left pane', note: 'also clickable in the status bar; the divider grip fills solid while dragging' },
-      { keys: ['Enter', 'double-click'], action: 'Open the dedicated repo page', note: 'on a folder/collapsible group header: collapse/expand instead' },
-      { keys: ['r'], action: 'Retry selected repo if it failed or was skipped' },
-      { keys: ['R'], action: 'Retry all repos with an issue' },
-      { keys: ['e'], action: 'Refetch / pull selected repo', note: 're-pull regardless of status — incl. idle/cached repos when auto-pull was suppressed' },
-      { keys: ['E'], action: 'Refetch / pull all repos not in progress', note: 'the manual "pull everything" when auto-pull-on-launch is off or suppressed' },
-      { keys: ['i'], action: 'Toggle the info panel above the log/diff', note: 'additive block; tracks the selection. Bold labels; empty rows hidden; clickable branch/commit/remote links (branch & remote wrap on separators rather than truncate); ⧉ copies the path (and the log, from the log pane); truncated path/subject expand on click', keywords: ['info', 'copy', 'link', 'expand', 'github', 'wrap'] },
-      { keys: ['d'], action: 'Toggle the per-repo diff view' },
-      { keys: ['t'], action: 'Column-toggle leader', note: 'then u/a/d/l/w/b/s/p/c → status/ahead-behind/dirty/last/worktrees/branches/stashes/pulled/changed; stays active until Esc. The status column shows a short label with the failure kind (not found / auth / diverged / timeout / network / lock) on failed repos. The pulled (⇣) and changed (±) columns show what the last pull landed — commits and files — and auto-hide when nothing was pulled. Zeros render dim; a column every repo lacks (no worktrees/stashes, ≤1 branch) auto-hides and its menu chip is dim/inert', keywords: ['columns', 'status', 'reason', 'error', 'pulled', 'changed', 'commits', 'files'] },
-      { keys: ['s'], action: 'Sort leader', note: 'then n/c/s/d (+a/l/w/b/k/p/g for visible columns) → name/branch/status/dirty/ahead-behind/last/worktrees/branches/stashes/pulled/changed; the menu lists only currently-visible columns. Re-pick flips ▲▼ (or click a header); the status-bar ⟪column ▲⟫ tag is clickable too and flips direction. The list is always sorted — Name asc is the default', keywords: ['sort', 'order', 'ascending', 'descending', 'branch', 'pulled', 'changed'] },
-      { keys: ['f'], action: 'Status-filter leader', note: 'then a/u/c/s/f/i → all/updated/up-to-date/skipped/failed/issues', keywords: ['filter', 'status'] },
-      { keys: ['o'], action: "Open the selected repo's remote in the browser" },
-      { keys: ['y'], action: "Copy the selected repo's absolute path", note: 'every copy confirms with a toast previewing the first lines of the copied text', keywords: ['copy', 'clipboard', 'toast'] },
-      { keys: ['Y'], action: "Copy the selected repo's remote (origin) URL", keywords: ['copy', 'clipboard'] },
-      { keys: ['c'], action: 'Start claude code in the selected repo', note: 'suspends the TUI; PULL_CLAUDE_CMD overrides' },
-      { keys: ['l'], action: 'Open lazygit in the selected repo', note: 'suspends the TUI; warns if lazygit is not installed', keywords: ['lazygit', 'git ui'] },
-      { keys: ['x'], action: "Clear this repo's log buffer", note: 'empties the streamed pull output' },
-      { keys: ['D'], action: 'Open the documentation website in the browser', keywords: ['docs', 'help website'] },
-      { keys: [','], action: 'Open the settings modal', note: 'General: panel padding · grouping · tree view — Theming: icons (Unicode/emoji) · theme (auto/dark/light, auto re-detects live) · background (normal/soft/terminal) · contrast (normal/soft) — Sync: auto-pull on launch · auto-pull limit (50/100/250/∞) · auto-pull in tree view; rows and radio chips are clickable, [x]/outside-click closes', keywords: ['settings', 'preferences', 'config', 'emoji', 'padding', 'theme', 'background', 'terminal', 'contrast', 'dark mode', 'light mode', 'grouping', 'tree', 'mouse', 'auto-pull', 'cache'] },
-      { keys: ['?'], action: 'Open the help modal' },
-      { keys: ['/'], action: 'Filter repos by name' },
-      { keys: ['Esc'], action: 'Clear the filter, or quit when no filter' },
-      { keys: ['q'], action: 'Quit' },
-      { keys: ['Ctrl', 'C'], action: 'Quit', note: 'exit code 130' },
-    ],
-  },
-  {
-    id: 'page',
-    title: 'Repo page',
-    blurb: 'Full-screen view of one repo: every local branch (with change stats vs the base branch), worktree, and stash, with fresh ahead/behind and a bottom info panel.',
-    bindings: [
-      { keys: ['j', 'k', 'g', 'G', 'Home', 'End'], action: 'Navigate rows' },
-      { keys: ['PgUp', 'PgDn'], action: 'Scroll' },
-      { keys: ['Enter', 'double-click'], action: 'Open the diff modal', note: 'stash, dirty row, or a branch vs its base; "no changes" toasts instead' },
-      { keys: ['Shift', 'Enter'], action: 'Check out the selected branch', note: 'clean, non-current branch', keywords: ['checkout', 'switch'] },
-      { keys: ['t'], action: 'Column-toggle menu', note: 'then b/y/a/m/d/c/u/f/g/s → ahead-behind/dirty/added/modified/deleted/total/upstream/base/age/subject; clickable chips; empty columns auto-hide and their chip is dim/inert; persisted', keywords: ['columns', 'added', 'modified', 'deleted', 'stats', 'base'] },
-      { keys: ['i'], action: 'Toggle the bottom info panel', note: 'branch/upstream/base + merge-base, ahead-behind, change stats, last commit; persisted' },
-      { keys: ['p'], action: 'Fast-forward the selected branch/worktree', keywords: ['pull', 'ff'] },
-      { keys: ['P'], action: 'Fast-forward every fast-forwardable branch', keywords: ['pull all', 'ff'] },
-      { keys: ['d'], action: 'Context action: delete branch / drop stash / remove worktree / discard', note: 'dynamic to the row; confirmation scaled to danger' },
-      { keys: ['o'], action: 'Open the selected branch on the remote (e.g. GitHub) in the browser' },
-      { keys: ['y'], action: 'Copy menu — absolute path / branch name / both', note: 'copying confirms with a toast previewing the copied text', keywords: ['copy', 'clipboard', 'toast'] },
-      { keys: ['b'], action: 'Base-branch picker for the selected branch', note: 'overrides which base its diff stats compare against; click the base cell too. Pick "auto-detect" to clear the override; persisted', keywords: ['base', 'fork', 'parent', 'override'] },
-      { keys: ['c'], action: "Start claude code in the row's path" },
-      { keys: ['l'], action: "Open lazygit in the row's path" },
-      { keys: ['Esc', 'q'], action: 'Back to the repo list' },
-    ],
-  },
-  {
-    id: 'diff',
-    title: 'Diff modal',
-    blurb: 'A 90%-of-screen overlay: a file-list panel over the selected file’s diff, in two bordered sub-panels.',
-    bindings: [
-      { keys: ['Tab'], action: 'Switch focus between the file list and the diff', note: 'the focused panel gets a bright border', keywords: ['focus'] },
-      { keys: ['↑', '↓', 'j', 'k'], action: 'Drive the focused panel', note: 'pick a file, or scroll the diff' },
-      { keys: ['click', 'double-click'], action: 'Pick the clicked file' },
-      { keys: ['g', 'G', 'Home', 'End'], action: 'First/last file, or diff top/bottom (per focus)' },
-      { keys: ['PgUp', 'PgDn'], action: 'Page the diff panel' },
-      { keys: ['Shift', 'PgUp', 'PgDn'], action: 'Page the file list', note: 'Alt too — moves the selection a viewport at a time' },
-      { keys: ['Shift', 'wheel'], action: 'Scroll the file list', note: 'Alt+wheel too — selection unchanged' },
-      { keys: ['f'], action: 'Filter the file list by status', note: 'shown with >10 files across ≥2 statuses; cycles all → each status → all; clickable chips with count badges, list grouped by status', keywords: ['filter', 'status', 'modified', 'added', 'deleted'] },
-      { keys: ['t'], action: 'Toggle uncommitted ⇄ vs base branch', note: 'dirty rows only; re-lists files' },
-      { keys: ['d'], action: 'Discard changes (current branch) / remove worktree / drop stash', note: 'with confirmation' },
-      { keys: ['Esc', 'q'], action: 'Close the modal' },
-    ],
-  },
-];
+export const keymap: KeymapSection[] = keymapData as KeymapSection[];
