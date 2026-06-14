@@ -1,9 +1,13 @@
 ---
 /**
  * Overrides Starlight's native <select> theme switcher with a single button that cycles
- * light → dark → system. "system" follows the OS `prefers-color-scheme` live. Persists to the
- * same `starlight-theme` key Starlight's provider reads ('light' | 'dark' | 'auto'), so it stays
- * in sync across navigations.
+ * light → dark → system. "system" follows the OS `prefers-color-scheme` live.
+ *
+ * Persistence matches Starlight's own convention: store 'light'/'dark' under `starlight-theme`
+ * for explicit choices, and REMOVE the key for system mode. Starlight's first-paint head script
+ * resolves a stored value with `theme === 'light' ? 'light' : 'dark'` — so a literal 'auto' would
+ * be read as dark. Leaving the key absent lets its `prefers-color-scheme` fallback run, so system
+ * mode renders the real OS theme on first paint with no flash.
  */
 ---
 
@@ -40,7 +44,9 @@
 
   function apply(mode: Mode) {
     try {
-      localStorage.setItem(KEY, mode);
+      // Absent key = system mode (Starlight's head script then resolves via prefers-color-scheme).
+      if (mode === 'auto') localStorage.removeItem(KEY);
+      else localStorage.setItem(KEY, mode);
     } catch {}
     document.documentElement.dataset.theme = resolve(mode);
     sync();
@@ -59,6 +65,9 @@
   }
 
   function init() {
+    // Migrate the legacy literal 'auto' some users still have stored: older builds wrote it, and
+    // Starlight's head script reads it as dark. Drop it so system mode resolves to the OS theme.
+    if (localStorage.getItem(KEY) === 'auto') apply('auto');
     sync();
     document.querySelectorAll<HTMLButtonElement>('[data-theme-toggle]').forEach((btn) => {
       if (btn.dataset.bound) return;
