@@ -28,9 +28,11 @@ export default defineConfig({
         },
       ],
       customCss: ['./src/styles/custom.css'],
-      // Replace the native <select> theme switcher with a sun/moon toggle button.
       components: {
+        // Replace the native <select> theme switcher with a cycling toggle button.
         ThemeSelect: './src/components/ThemeToggle.astro',
+        // Skip the duplicate page-title h1 on the splash homepage (the hero is the h1).
+        PageTitle: './src/components/PageTitle.astro',
       },
       sidebar: [
         {

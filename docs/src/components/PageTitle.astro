@@ -1,0 +1,23 @@
+---
+/**
+ * Overrides Starlight's PageTitle. On the splash homepage the custom hero already provides the
+ * visible `<h1 id="_top">`, so rendering Starlight's title h1 too would duplicate "polygit". Skip
+ * it on splash; render the normal page title everywhere else.
+ */
+const route = Astro.locals.starlightRoute;
+const isSplash = route.entry.data.template === 'splash';
+---
+
+{!isSplash && <h1 id="_top">{route.entry.data.title}</h1>}
+
+<style>
+  @layer starlight.core {
+    h1 {
+      margin-top: 1rem;
+      font-size: var(--sl-text-h1);
+      line-height: var(--sl-line-height-headings);
+      font-weight: 600;
+      color: var(--sl-color-white);
+    }
+  }
+</style>
